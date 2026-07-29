@@ -10,7 +10,8 @@ Tau Web 目前已经支持：
 - 向已有会话发送任务
 - 通过 SSE 接收实时 `CodingSessionEvent`
 - 取消当前运行
-- 切换会话的 Provider、模型和 Thinking level
+- 配置唯一可用的 OpenAI-compatible 连接（URL、Key、模型名称）
+- 在新建和已有会话中选择受支持的 Thinking level
 - 执行适用于 Web 的斜杠命令
 - 在运行中发送 steering / follow-up 消息
 - 在浏览器中确认或拒绝工具调用
@@ -20,8 +21,8 @@ Tau Web 目前已经支持：
 
 - [x] **新建会话**
   - 选择项目目录
-  - 选择 Provider
-  - 选择模型
+  - 编辑唯一 Provider 连接的 URL、Key 和模型名称
+  - 选择会话级 Thinking level
   - 创建成功后自动进入新会话
 
 - [x] **会话管理**
@@ -31,9 +32,9 @@ Tau Web 目前已经支持：
 
 ## P1：补齐 Agent 运行控制
 
-- [x] **Provider、模型与 Thinking 切换**
+- [x] **Provider、模型与 Thinking 配置**
   - 展示当前 Provider、模型和 Thinking level
-  - 只展示当前配置中可用的选项
+  - Web 只展示默认或首个具有可用凭据的 OpenAI-compatible Provider
   - 切换结果写入会话状态
 
 - [x] **斜杠命令**

@@ -31,6 +31,32 @@
     return session;
   }
 
+  async function configureAndCreateSession(options, services) {
+    const payload = await services.updateProvider(options.connection);
+    const provider = payload?.provider;
+    if (!provider || typeof provider.name !== "string" || !provider.name) {
+      throw new Error("Provider update returned an invalid connection");
+    }
+    const levels = Array.isArray(provider.thinkingLevels)
+      ? provider.thinkingLevels
+      : [];
+    if (options.thinkingLevel !== null && !levels.includes(options.thinkingLevel)) {
+      throw new Error(
+        `Thinking level ${options.thinkingLevel} is not available for ${provider.model}`,
+      );
+    }
+    return createAndEnterSession(
+      {
+        cwd: options.cwd,
+        providerName: provider.name,
+        model: provider.model,
+        thinkingLevel: options.thinkingLevel,
+        temperature: options.temperature,
+      },
+      services,
+    );
+  }
+
   function shouldActivateAcceptedRun(runId, settledRunIds) {
     if (!settledRunIds.has(runId)) return true;
     settledRunIds.delete(runId);
@@ -38,6 +64,7 @@
   }
 
   global.TauSessionActions = Object.freeze({
+    configureAndCreateSession,
     createAndEnterSession,
     resolveTemperature,
     shouldActivateAcceptedRun,

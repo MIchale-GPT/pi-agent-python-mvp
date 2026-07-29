@@ -778,6 +778,16 @@ class CodingSession:
         self._session_start_pending = False
         await self._extension_runtime.emit_session_start("startup")
 
+    async def persist_initial_state(self) -> None:
+        """Persist a newly loaded empty session's model and thinking choices.
+
+        Frontends that configure a session before its first prompt can call this
+        checkpoint so those choices survive a restart even when no message has
+        been appended yet.
+        """
+        await self._ensure_session_initialized()
+        await self._refresh_persisted_state(leaf_id=self._last_parent_id)
+
     def queue_steering_message(
         self,
         content: str,

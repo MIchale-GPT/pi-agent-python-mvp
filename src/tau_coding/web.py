@@ -39,16 +39,21 @@ from tau_coding.events import CodingSessionEvent
 from tau_coding.provider_config import (
     MAX_TEMPERATURE,
     MIN_TEMPERATURE,
+    OpenAICompatibleProviderConfig,
     ProviderConfigError,
+    ProviderSelection,
     ProviderSettings,
     compatible_temperature,
     load_provider_settings,
     normalize_temperature,
+    provider_has_usable_api_key,
     provider_supports_temperature,
     provider_thinking_levels,
     provider_thinking_unavailable_reason,
     resolve_provider_selection,
     resolve_startup_thinking_level,
+    save_provider_settings,
+    set_openai_compatible_provider_connection,
 )
 from tau_coding.provider_runtime import ClosableModelProvider, create_model_provider
 from tau_coding.resources import TauResourcePaths
@@ -77,6 +82,7 @@ _RUNTIME_CALL_TIMEOUT_SECONDS = 15.0
 _SSE_HEARTBEAT_SECONDS = 15.0
 _SSE_QUEUE_ITEMS = 2_048
 _TOOL_AUTHORIZATION_TIMEOUT_SECONDS = 120.0
+_WEB_PROVIDER_NAME = "tau-web"
 _WEB_IMMEDIATE_COMMANDS = frozenset(
     {
         "hotkeys",
@@ -128,6 +134,15 @@ class WebSessionExport:
     body: bytes
     content_type: str
     filename: str
+
+
+@dataclass(frozen=True, slots=True)
+class WebProviderUpdate:
+    """Editable connection values accepted from the local Web frontend."""
+
+    base_url: str
+    api_key: str | None
+    model: str
 
 
 @dataclass(slots=True)
@@ -250,6 +265,7 @@ class TauWebRuntime:
         cwd: str,
         provider_name: str,
         model: str,
+        thinking_level: str | None = None,
         temperature: float | None = None,
     ) -> dict[str, object]:
         """Create and index a session from browser-selected options."""
@@ -258,9 +274,17 @@ class TauWebRuntime:
                 cwd=cwd,
                 provider_name=provider_name,
                 model=model,
+                thinking_level=thinking_level,
                 temperature=temperature,
             )
         )
+
+    def update_provider(
+        self,
+        update: WebProviderUpdate,
+    ) -> dict[str, object]:
+        """Update the single OpenAI-compatible connection exposed by Tau Web."""
+        return self._call(self._update_provider(update))
 
     def rename_session(self, session_id: str, title: str) -> dict[str, object]:
         """Rename one indexed session."""
@@ -687,12 +711,54 @@ class TauWebRuntime:
     async def _session_options(self) -> dict[str, object]:
         return session_options_payload(self._manager)
 
+    async def _update_provider(
+        self,
+        update: WebProviderUpdate,
+    ) -> dict[str, object]:
+        normalized_base_url = _normalize_web_provider_base_url(update.base_url)
+        normalized_model = _normalize_web_provider_model(update.model)
+        settings = load_provider_settings(self._manager.paths)
+        source_provider = _select_web_provider_connection(settings, self._manager)
+        updated_settings = set_openai_compatible_provider_connection(
+            settings,
+            provider_name=_WEB_PROVIDER_NAME,
+            source_provider_name=source_provider.name,
+            base_url=normalized_base_url,
+            model=normalized_model,
+        )
+        updated_provider = updated_settings.get_provider(_WEB_PROVIDER_NAME)
+        if not isinstance(updated_provider, OpenAICompatibleProviderConfig):
+            raise AssertionError("Tau Web provider must be OpenAI-compatible")
+        credential_store = _web_credential_store(self._manager)
+        if update.api_key is not None and update.api_key.strip():
+            credential_store.set(_WEB_PROVIDER_NAME, update.api_key)
+        elif source_provider.name != _WEB_PROVIDER_NAME and source_provider.credential_name:
+            existing_key = credential_store.get(source_provider.credential_name)
+            if existing_key:
+                credential_store.set(_WEB_PROVIDER_NAME, existing_key)
+        if not provider_has_usable_api_key(
+            updated_provider,
+            credential_reader=credential_store,
+        ):
+            raise WebSessionValidationError(
+                "provider_api_key_required",
+                "Configure an API key before using this Provider",
+            )
+        save_provider_settings(updated_settings, self._manager.paths)
+        return {
+            "provider": _web_provider_payload(
+                updated_provider,
+                credential_store=credential_store,
+            )
+        }
+
     async def _create_session(
         self,
         *,
         cwd: str,
         provider_name: str,
         model: str,
+        thinking_level: str | None,
         temperature: float | None,
     ) -> dict[str, object]:
         requested_cwd = Path(cwd).expanduser()
@@ -709,18 +775,14 @@ class TauWebRuntime:
                 f"Project path is not a directory: {resolved_cwd}",
             )
 
-        try:
-            settings = load_provider_settings(self._manager.paths)
-            selection = resolve_provider_selection(
-                settings,
-                provider_name=provider_name,
-                model=model,
-            )
-        except ProviderConfigError as exc:
-            raise WebSessionValidationError(
-                "provider_selection_invalid",
-                str(exc),
-            ) from exc
+        settings = load_provider_settings(self._manager.paths)
+        selection = _resolve_web_session_selection(
+            settings,
+            self._manager,
+            provider_name=provider_name,
+            model=model,
+            thinking_level=thinking_level,
+        )
         try:
             normalized_temperature = normalize_temperature(temperature)
         except ProviderConfigError as exc:
@@ -732,13 +794,32 @@ class TauWebRuntime:
                 "temperature_unsupported",
                 f"Temperature is not supported for {selection.provider.name}:{selection.model}",
             )
-
         record = self._manager.create_session(
             cwd=resolved_cwd,
             provider_name=selection.provider.name,
             model=selection.model,
             temperature=normalized_temperature,
         )
+        if thinking_level is not None:
+            slot = self._slots.setdefault(record.id, _WebSessionSlot())
+            handle: WebSessionHandle | None = None
+            try:
+                handle = await self._ensure_handle(record, slot)
+                if thinking_level != handle.session.thinking_level:
+                    await handle.session.set_thinking_level(
+                        thinking_level,
+                        persist_default=False,
+                    )
+                await handle.session.persist_initial_state()
+                record = self._manager.get_session(record.id) or record
+            except BaseException:
+                self._slots.pop(record.id, None)
+                if handle is not None:
+                    with suppress(BaseException):
+                        await handle.aclose()
+                with suppress(OSError, ValueError):
+                    self._manager.delete_session(record.id)
+                raise
         return {"session": _session_metadata(record)}
 
     async def _rename_session(self, session_id: str, title: str) -> dict[str, object]:
@@ -762,25 +843,13 @@ class TauWebRuntime:
             raise WebSessionBusyError("A running session cannot change configuration")
 
         settings = load_provider_settings(self._manager.paths)
-        try:
-            selection = resolve_provider_selection(
-                settings,
-                provider_name=provider_name,
-                model=model,
-            )
-        except ProviderConfigError as exc:
-            raise WebSessionValidationError("provider_selection_invalid", str(exc)) from exc
-        available_thinking_levels = provider_thinking_levels(
-            selection.provider,
-            model=selection.model,
+        _resolve_web_session_selection(
+            settings,
+            self._manager,
+            provider_name=provider_name,
+            model=model,
+            thinking_level=thinking_level,
         )
-        if thinking_level is not None and thinking_level not in available_thinking_levels:
-            available = ", ".join(available_thinking_levels) or "none"
-            raise WebSessionValidationError(
-                "thinking_level_invalid",
-                f"Thinking level is not available for {provider_name}:{model}. "
-                f"Available levels: {available}",
-            )
 
         handle = await self._ensure_handle(record, slot)
         try:
@@ -953,6 +1022,8 @@ def session_detail_payload(manager: SessionManager, session_id: str) -> dict[str
 def session_options_payload(manager: SessionManager) -> dict[str, object]:
     """Return configured choices used by Tau Web's new-session form."""
     settings = load_provider_settings(manager.paths)
+    provider = _select_web_provider_connection(settings, manager)
+    credential_store = _web_credential_store(manager)
     current_cwd = Path.cwd().resolve()
     recent_projects = list(
         dict.fromkeys([str(record.cwd) for record in manager.list_sessions()] + [str(current_cwd)])
@@ -960,12 +1031,138 @@ def session_options_payload(manager: SessionManager) -> dict[str, object]:
     return {
         "defaultProjectDirectory": str(current_cwd),
         "recentProjectDirectories": recent_projects,
-        "defaultProvider": settings.default_provider,
+        "defaultProvider": provider.name,
+        "provider": _web_provider_payload(
+            provider,
+            credential_store=credential_store,
+        ),
         "providers": [
+            _configuration_provider_payload(
+                provider,
+                include_temperature=True,
+            )
+        ],
+    }
+
+
+def _web_credential_store(manager: SessionManager) -> FileCredentialStore:
+    return FileCredentialStore(credentials_path(manager.paths))
+
+
+def _select_web_provider_connection(
+    settings: ProviderSettings,
+    manager: SessionManager,
+) -> OpenAICompatibleProviderConfig:
+    compatible = [
+        provider
+        for provider in settings.providers
+        if isinstance(provider, OpenAICompatibleProviderConfig)
+    ]
+    if not compatible:
+        return OpenAICompatibleProviderConfig(
+            name=_WEB_PROVIDER_NAME,
+            credential_name=_WEB_PROVIDER_NAME,
+        )
+    dedicated = next(
+        (provider for provider in compatible if provider.name == _WEB_PROVIDER_NAME),
+        None,
+    )
+    if dedicated is not None:
+        return dedicated
+    default = next(
+        (provider for provider in compatible if provider.name == settings.default_provider),
+        None,
+    )
+    credential_store = _web_credential_store(manager)
+    usable = [
+        provider
+        for provider in compatible
+        if provider_has_usable_api_key(provider, credential_reader=credential_store)
+    ]
+    if default is not None and default in usable:
+        return default
+    if usable:
+        return usable[0]
+    return default or compatible[0]
+
+
+def _resolve_web_session_selection(
+    settings: ProviderSettings,
+    manager: SessionManager,
+    *,
+    provider_name: str,
+    model: str,
+    thinking_level: str | None,
+) -> ProviderSelection:
+    provider = _select_web_provider_connection(settings, manager)
+    try:
+        if provider_name != provider.name:
+            raise ProviderConfigError(f"Tau Web exposes only provider {provider.name}")
+        selection = resolve_provider_selection(
+            settings,
+            provider_name=provider_name,
+            model=model,
+        )
+    except ProviderConfigError as exc:
+        raise WebSessionValidationError("provider_selection_invalid", str(exc)) from exc
+
+    available_thinking_levels = provider_thinking_levels(
+        selection.provider,
+        model=selection.model,
+    )
+    if thinking_level is not None and thinking_level not in available_thinking_levels:
+        available = ", ".join(available_thinking_levels) or "none"
+        raise WebSessionValidationError(
+            "thinking_level_invalid",
+            f"Thinking level is not available for {provider_name}:{model}. "
+            f"Available levels: {available}",
+        )
+    return selection
+
+
+def _web_provider_payload(
+    provider: OpenAICompatibleProviderConfig,
+    *,
+    credential_store: FileCredentialStore,
+) -> dict[str, object]:
+    model = provider.default_model
+    levels = provider_thinking_levels(provider, model=model)
+    return {
+        "name": provider.name,
+        "baseUrl": provider.base_url.rstrip("/"),
+        "model": model,
+        "apiKeyConfigured": provider_has_usable_api_key(
+            provider,
+            credential_reader=credential_store,
+        ),
+        "thinkingLevels": list(levels),
+        "defaultThinkingLevel": resolve_startup_thinking_level(provider, model),
+        "temperatureSupported": provider_supports_temperature(provider, model),
+        "temperatureRange": {
+            "min": MIN_TEMPERATURE,
+            "max": MAX_TEMPERATURE,
+            "step": "any",
+        },
+    }
+
+
+def _configuration_provider_payload(
+    provider: OpenAICompatibleProviderConfig,
+    *,
+    include_temperature: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "name": provider.name,
+        "models": list(provider.models),
+        "defaultModel": provider.default_model,
+        "thinkingLevels": {
+            model: list(provider_thinking_levels(provider, model=model))
+            for model in provider.models
+        },
+    }
+    if include_temperature:
+        payload.update(
             {
-                "name": provider.name,
-                "models": list(provider.models),
-                "defaultModel": provider.default_model,
                 "temperatureModels": [
                     model
                     for model in provider.models
@@ -977,23 +1174,43 @@ def session_options_payload(manager: SessionManager) -> dict[str, object]:
                     "step": "any",
                 },
             }
-            for provider in settings.providers
-        ],
-    }
+        )
+    return payload
 
 
-def _configuration_providers_payload(settings: ProviderSettings) -> list[dict[str, object]]:
-    return [
-        {
-            "name": provider.name,
-            "models": list(provider.models),
-            "thinkingLevels": {
-                model: list(provider_thinking_levels(provider, model=model))
-                for model in provider.models
-            },
-        }
-        for provider in settings.providers
-    ]
+def _configuration_providers_payload(
+    settings: ProviderSettings,
+    manager: SessionManager,
+) -> list[dict[str, object]]:
+    return [_configuration_provider_payload(_select_web_provider_connection(settings, manager))]
+
+
+def _normalize_web_provider_base_url(value: str) -> str:
+    normalized = value.strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise WebSessionValidationError(
+            "provider_base_url_invalid",
+            "Provider URL must be an HTTP(S) URL without credentials, query, or fragment",
+        )
+    return normalized
+
+
+def _normalize_web_provider_model(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or any(character in normalized for character in "\r\n\t"):
+        raise WebSessionValidationError(
+            "provider_model_invalid",
+            "Model name must be a non-empty single line",
+        )
+    return normalized
 
 
 def _runtime_configuration_payload(
@@ -1007,7 +1224,7 @@ def _runtime_configuration_payload(
         "thinkingLevel": session.thinking_level,
         "availableThinkingLevels": list(session.available_thinking_levels),
         "thinkingUnavailableReason": session.thinking_unavailable_reason,
-        "providers": _configuration_providers_payload(settings),
+        "providers": _configuration_providers_payload(settings, manager),
     }
 
 
@@ -1030,7 +1247,7 @@ def _stored_configuration_payload(
             "thinkingLevel": None,
             "availableThinkingLevels": [],
             "thinkingUnavailableReason": "Session provider/model is not currently configured",
-            "providers": _configuration_providers_payload(settings),
+            "providers": _configuration_providers_payload(settings, manager),
         }
 
     active_entries = _active_session_entries(_read_session_entries(record.path))
@@ -1060,7 +1277,7 @@ def _stored_configuration_payload(
         "thinkingLevel": thinking_level,
         "availableThinkingLevels": list(available_thinking_levels),
         "thinkingUnavailableReason": unavailable_reason,
-        "providers": _configuration_providers_payload(settings),
+        "providers": _configuration_providers_payload(settings, manager),
     }
 
 
@@ -1166,6 +1383,9 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         path = unquote(urlsplit(self.path).path)
+        if path == "/api/provider":
+            self._update_provider()
+            return
         if path == "/api/sessions":
             self._create_session()
             return
@@ -1244,6 +1464,7 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
         cwd = body.get("cwd")
         provider_name = body.get("providerName")
         model = body.get("model")
+        thinking_level = body.get("thinkingLevel")
         temperature = body.get("temperature")
         required_options = (cwd, provider_name, model)
         if not all(isinstance(value, str) and value.strip() for value in required_options):
@@ -1263,11 +1484,22 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.UNPROCESSABLE_ENTITY,
             )
             return
+        if thinking_level is not None and (
+            not isinstance(thinking_level, str) or not thinking_level.strip()
+        ):
+            self._send_json(
+                {"error": "thinking_level_invalid"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
         try:
             payload = self._tau_server.web_runtime.create_session(
                 cwd=cast(str, cwd).strip(),
                 provider_name=cast(str, provider_name).strip(),
                 model=cast(str, model).strip(),
+                thinking_level=(
+                    thinking_level.strip() if isinstance(thinking_level, str) else None
+                ),
                 temperature=cast(float | None, temperature),
             )
         except WebSessionValidationError as exc:
@@ -1283,6 +1515,53 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(payload, status=HTTPStatus.CREATED)
+
+    def _update_provider(self) -> None:
+        body = self._read_command_json()
+        if body is None:
+            return
+        base_url = body.get("baseUrl")
+        model = body.get("model")
+        api_key = body.get("apiKey")
+        if not isinstance(base_url, str) or not base_url.strip():
+            self._send_json(
+                {"error": "provider_base_url_required"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        if not isinstance(model, str) or not model.strip():
+            self._send_json(
+                {"error": "provider_model_required"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        if api_key is not None and not isinstance(api_key, str):
+            self._send_json(
+                {"error": "provider_api_key_invalid"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        try:
+            payload = self._tau_server.web_runtime.update_provider(
+                WebProviderUpdate(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                )
+            )
+        except WebSessionValidationError as exc:
+            self._send_json(
+                {"error": exc.code, "message": str(exc)},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        except (FutureTimeoutError, OSError, ProviderConfigError, RuntimeError, ValueError) as exc:
+            self._send_json(
+                {"error": "provider_update_failed", "message": str(exc)},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self._send_json(payload)
 
     def _rename_session(self, session_id: str) -> None:
         if not self._valid_session_id(session_id):

@@ -30,11 +30,19 @@ from tau_agent.messages import (
 )
 from tau_agent.provider import CancellationToken, ModelProvider
 from tau_agent.provider_events import AssistantMessageEvent
-from tau_agent.session import JsonlSessionStorage, LeafEntry, MessageEntry, entry_to_json_line
+from tau_agent.session import (
+    JsonlSessionStorage,
+    LeafEntry,
+    MessageEntry,
+    ThinkingLevelChangeEntry,
+    entry_to_json_line,
+)
 from tau_agent.tools import AgentTool, AgentToolResult
 from tau_coding import session as coding_session_module
+from tau_coding.credentials import FileCredentialStore, OAuthCredential, credentials_path
 from tau_coding.paths import TauPaths
 from tau_coding.provider_config import (
+    AnthropicProviderConfig,
     OpenAICompatibleProviderConfig,
     ProviderModelMetadata,
     ProviderSettings,
@@ -207,6 +215,10 @@ def test_web_server_serves_live_a_theme_and_session_api(tmp_path: Path) -> None:
         assert 'id="new-session-dialog"' in page_body
         assert 'id="new-session-temperature-mode"' in page_body
         assert 'id="new-session-temperature"' in page_body
+        assert 'id="new-session-provider-url"' in page_body
+        assert 'id="new-session-api-key"' in page_body
+        assert 'id="new-session-model"' in page_body
+        assert 'id="new-session-thinking"' in page_body
         assert 'step="any"' in page_body
         assert 'id="rename-session-dialog"' in page_body
         assert 'id="delete-session-dialog"' in page_body
@@ -274,11 +286,22 @@ def test_session_options_and_create_api_open_a_configured_project_session(
         providers=(
             OpenAICompatibleProviderConfig(
                 name="fake-provider",
+                credential_name="fake-provider",
                 models=("fake-small", "fake-large"),
                 default_model="fake-large",
+                thinking_levels=("off", "low"),
+                thinking_default="low",
+                thinking_parameter="reasoning_effort",
+            ),
+            OpenAICompatibleProviderConfig(
+                name="unused-provider",
+                credential_name="unused-provider",
+                models=("unused-model",),
+                default_model="unused-model",
             ),
         ),
     )
+    FileCredentialStore(credentials_path(manager.paths)).set("fake-provider", "secret")
     monkeypatch.setattr(web_module, "load_provider_settings", lambda paths: settings)
     server = create_web_server(host="127.0.0.1", port=0, session_manager=manager)
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -291,11 +314,25 @@ def test_session_options_and_create_api_open_a_configured_project_session(
 
         assert status == 200
         assert options["defaultProvider"] == "fake-provider"
+        assert options["provider"] == {
+            "name": "fake-provider",
+            "baseUrl": "https://api.openai.com/v1",
+            "model": "fake-large",
+            "apiKeyConfigured": True,
+            "thinkingLevels": ["off", "low"],
+            "defaultThinkingLevel": "low",
+            "temperatureSupported": True,
+            "temperatureRange": {"min": 0.0, "max": 2.0, "step": "any"},
+        }
         assert options["providers"] == [
             {
                 "name": "fake-provider",
                 "models": ["fake-small", "fake-large"],
                 "defaultModel": "fake-large",
+                "thinkingLevels": {
+                    "fake-small": ["off", "low"],
+                    "fake-large": ["off", "low"],
+                },
                 "temperatureModels": ["fake-small", "fake-large"],
                 "temperatureRange": {"min": 0.0, "max": 2.0, "step": "any"},
             }
@@ -329,6 +366,284 @@ def test_session_options_and_create_api_open_a_configured_project_session(
         assert detail["messages"] == []
         assert detail["configuration"]["providerName"] == "fake-provider"
         assert detail["configuration"]["model"] == "fake-small"
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_session_options_offer_setup_when_no_openai_compatible_provider_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    settings = ProviderSettings(
+        default_provider="anthropic",
+        providers=(AnthropicProviderConfig(),),
+    )
+    saved: list[ProviderSettings] = []
+    monkeypatch.setattr(
+        web_module,
+        "load_provider_settings",
+        lambda paths: saved[-1] if saved else settings,
+    )
+    monkeypatch.setattr(
+        web_module,
+        "save_provider_settings",
+        lambda updated, paths: saved.append(updated) or paths.home / "providers.json",
+    )
+    server = create_web_server(host="127.0.0.1", port=0, session_manager=manager)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        status, options = _get_json(connection, "/api/session-options")
+
+        assert status == 200
+        assert options["defaultProvider"] == "tau-web"
+        assert options["provider"] == {
+            "name": "tau-web",
+            "baseUrl": "https://api.openai.com/v1",
+            "model": "gpt-5.4",
+            "apiKeyConfigured": False,
+            "thinkingLevels": [],
+            "defaultThinkingLevel": None,
+            "temperatureSupported": False,
+            "temperatureRange": {"min": 0.0, "max": 2.0, "step": "any"},
+        }
+        assert [provider["name"] for provider in options["providers"]] == ["tau-web"]
+
+        status, configured = _post_json(
+            connection,
+            "/api/provider",
+            {
+                "baseUrl": "http://localhost:8000/v1",
+                "apiKey": "local-secret",
+                "model": "local-model",
+            },
+        )
+
+        assert status == 200
+        assert configured["provider"]["name"] == "tau-web"
+        assert configured["provider"]["baseUrl"] == "http://localhost:8000/v1"
+        assert configured["provider"]["model"] == "local-model"
+        assert saved[-1].default_provider == "anthropic"
+        assert saved[-1].get_provider("anthropic") == settings.get_provider("anthropic")
+        assert saved[-1].get_provider("tau-web").api == "openai-completions"
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_session_options_do_not_report_oauth_as_an_editable_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    monkeypatch.delenv("COPILOT_TEST_API_KEY", raising=False)
+    provider = OpenAICompatibleProviderConfig(
+        name="github-copilot",
+        api_key_env="COPILOT_TEST_API_KEY",
+        credential_name="github-copilot",
+        models=("copilot-model",),
+        default_model="copilot-model",
+    )
+    settings = ProviderSettings(
+        default_provider=provider.name,
+        providers=(provider,),
+    )
+    FileCredentialStore(credentials_path(manager.paths)).set_oauth(
+        "github-copilot",
+        OAuthCredential(
+            access="oauth-access",
+            refresh="oauth-refresh",
+            expires=4_000_000_000_000,
+        ),
+    )
+    monkeypatch.setattr(web_module, "load_provider_settings", lambda paths: settings)
+
+    options = web_module.session_options_payload(manager)
+
+    assert options["provider"]["name"] == "github-copilot"
+    assert options["provider"]["apiKeyConfigured"] is False
+
+
+def test_provider_api_updates_the_single_web_connection_without_returning_the_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    current = ProviderSettings(
+        default_provider="custom",
+        providers=(
+            OpenAICompatibleProviderConfig(
+                name="custom",
+                base_url="http://old.example/v1",
+                api_key_env="CUSTOM_API_KEY",
+                credential_name="custom",
+                models=("old-model",),
+                default_model="old-model",
+                thinking_levels=("off", "medium", "high"),
+                thinking_default="medium",
+                thinking_parameter="reasoning_effort",
+            ),
+        ),
+    )
+    saved: list[ProviderSettings] = []
+
+    def load_settings(paths: TauPaths) -> ProviderSettings:
+        del paths
+        return saved[-1] if saved else current
+
+    def save_settings(settings: ProviderSettings, paths: TauPaths) -> Path:
+        saved.append(settings)
+        return paths.home / "providers.json"
+
+    monkeypatch.setattr(web_module, "load_provider_settings", load_settings)
+    monkeypatch.setattr(web_module, "save_provider_settings", save_settings)
+    server = create_web_server(host="127.0.0.1", port=0, session_manager=manager)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        status, missing_key = _post_json(
+            connection,
+            "/api/provider",
+            {
+                "baseUrl": "http://127.0.0.1:9000/v1/",
+                "model": "new-model",
+            },
+        )
+        assert status == 422
+        assert missing_key["error"] == "provider_api_key_required"
+        assert saved == []
+
+        credential_store = FileCredentialStore(credentials_path(manager.paths))
+        credential_store.set("custom", "existing-secret")
+        status, copied = _post_json(
+            connection,
+            "/api/provider",
+            {
+                "baseUrl": "http://127.0.0.1:9000/v1/",
+                "model": "new-model",
+            },
+        )
+        assert status == 200
+        assert copied["provider"]["name"] == "tau-web"
+        assert copied["provider"]["apiKeyConfigured"] is True
+        assert credential_store.get("tau-web") == "existing-secret"
+
+        status, payload = _post_json(
+            connection,
+            "/api/provider",
+            {
+                "baseUrl": "http://127.0.0.1:9000/v1/",
+                "apiKey": "replacement-secret",
+                "model": "new-model",
+            },
+        )
+
+        assert status == 200
+        assert payload == {
+            "provider": {
+                "name": "tau-web",
+                "baseUrl": "http://127.0.0.1:9000/v1",
+                "model": "new-model",
+                "apiKeyConfigured": True,
+                "thinkingLevels": [],
+                "defaultThinkingLevel": None,
+                "temperatureSupported": True,
+                "temperatureRange": {"min": 0.0, "max": 2.0, "step": "any"},
+            }
+        }
+        assert "replacement-secret" not in json.dumps(payload)
+        assert credential_store.get("tau-web") == "replacement-secret"
+        assert saved[-1].default_provider == "custom"
+        assert saved[-1].get_provider("custom") == current.get_provider("custom")
+        configured = saved[-1].get_provider("tau-web")
+        assert configured.base_url == "http://127.0.0.1:9000/v1"
+        assert configured.models == ("new-model",)
+        assert configured.default_model == "new-model"
+
+        status, options = _get_json(connection, "/api/session-options")
+        assert status == 200
+        assert options["defaultProvider"] == "tau-web"
+        assert options["provider"]["name"] == "tau-web"
+        assert [provider["name"] for provider in options["providers"]] == ["tau-web"]
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_create_api_persists_the_selected_session_thinking_level(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    settings = ProviderSettings(
+        default_provider="fake-provider",
+        providers=(
+            OpenAICompatibleProviderConfig(
+                name="fake-provider",
+                models=("fake-model",),
+                default_model="fake-model",
+                thinking_levels=("off", "medium", "high"),
+                thinking_default="medium",
+                thinking_parameter="reasoning_effort",
+            ),
+        ),
+    )
+    monkeypatch.setattr(web_module, "load_provider_settings", lambda paths: settings)
+    provider = _StreamingFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        status, created = _post_json(
+            connection,
+            "/api/sessions",
+            {
+                "cwd": str(cwd),
+                "providerName": "fake-provider",
+                "model": "fake-model",
+                "thinkingLevel": "medium",
+            },
+        )
+
+        assert status == 201
+        record = manager.get_session(created["session"]["id"])
+        assert record is not None
+        entries = asyncio.run(JsonlSessionStorage(record.path).read_all())
+        thinking_entries = [
+            entry for entry in entries if isinstance(entry, ThinkingLevelChangeEntry)
+        ]
+        assert thinking_entries[-1].thinking_level == "medium"
     finally:
         connection.close()
         server.shutdown()
@@ -388,6 +703,118 @@ globalThis.TauSessionActions.createAndEnterSession(options, {
             ["enter", "session-new"],
         ],
         "returnedSessionId": "session-new",
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_browser_creation_controller_saves_the_connection_before_creating() -> None:
+    controller_path = Path(web_module.__file__).parent / "data" / "web" / "session-actions.js"
+    script = """
+require(process.argv[1]);
+const calls = [];
+const options = {
+  cwd: "/workspace/tau",
+  connection: {
+    baseUrl: "http://127.0.0.1:9000/v1",
+    apiKey: "secret",
+    model: "reasoner",
+  },
+  thinkingLevel: "high",
+  temperature: null,
+};
+globalThis.TauSessionActions.configureAndCreateSession(options, {
+  updateProvider: async (connection) => {
+    calls.push(["provider", connection]);
+    return {
+      provider: {
+        name: "custom",
+        model: "reasoner",
+        thinkingLevels: ["off", "medium", "high"],
+        defaultThinkingLevel: "medium",
+      },
+    };
+  },
+  createSession: async (session) => {
+    calls.push(["create", session]);
+    return { session: { id: "session-new" } };
+  },
+  registerSession: (session) => calls.push(["register", session.id]),
+  enterSession: async (sessionId) => calls.push(["enter", sessionId]),
+}).then(() => console.log(JSON.stringify(calls)));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", script, str(controller_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == [
+        [
+            "provider",
+            {
+                "baseUrl": "http://127.0.0.1:9000/v1",
+                "apiKey": "secret",
+                "model": "reasoner",
+            },
+        ],
+        [
+            "create",
+            {
+                "cwd": "/workspace/tau",
+                "providerName": "custom",
+                "model": "reasoner",
+                "thinkingLevel": "high",
+                "temperature": None,
+            },
+        ],
+        ["register", "session-new"],
+        ["enter", "session-new"],
+    ]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_browser_creation_controller_rejects_stale_thinking_after_model_update() -> None:
+    controller_path = Path(web_module.__file__).parent / "data" / "web" / "session-actions.js"
+    script = """
+require(process.argv[1]);
+let createCalled = false;
+globalThis.TauSessionActions.configureAndCreateSession({
+  cwd: "/workspace/tau",
+  connection: { baseUrl: "http://localhost/v1", apiKey: "", model: "plain-model" },
+  thinkingLevel: "high",
+  temperature: null,
+}, {
+  updateProvider: async () => ({
+    provider: {
+      name: "tau-web",
+      model: "plain-model",
+      thinkingLevels: [],
+      defaultThinkingLevel: null,
+    },
+  }),
+  createSession: async () => {
+    createCalled = true;
+    return { session: { id: "unexpected" } };
+  },
+  registerSession: () => {},
+  enterSession: async () => {},
+}).catch((error) => {
+  console.log(JSON.stringify({ message: error.message, createCalled }));
+});
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", script, str(controller_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "message": "Thinking level high is not available for plain-model",
+        "createCalled": False,
     }
 
 
@@ -539,7 +966,7 @@ def test_session_configuration_api_lists_available_choices_and_persists_switches
                 name="alpha",
                 models=("alpha-small", "alpha-large"),
                 default_model="alpha-small",
-                thinking_levels=("off", "low"),
+                thinking_levels=("off", "low", "high"),
                 thinking_default="low",
             ),
             OpenAICompatibleProviderConfig(
@@ -614,21 +1041,17 @@ def test_session_configuration_api_lists_available_choices_and_persists_switches
             "providerName": "alpha",
             "model": "alpha-small",
             "thinkingLevel": "low",
-            "availableThinkingLevels": ["off", "low"],
+            "availableThinkingLevels": ["off", "low", "high"],
             "thinkingUnavailableReason": None,
             "providers": [
                 {
                     "name": "alpha",
                     "models": ["alpha-small", "alpha-large"],
+                    "defaultModel": "alpha-small",
                     "thinkingLevels": {
-                        "alpha-small": ["off", "low"],
-                        "alpha-large": ["off", "low"],
+                        "alpha-small": ["off", "low", "high"],
+                        "alpha-large": ["off", "low", "high"],
                     },
-                },
-                {
-                    "name": "beta",
-                    "models": ["beta-reasoner"],
-                    "thinkingLevels": {"beta-reasoner": ["low", "high"]},
                 },
             ],
         }
@@ -637,20 +1060,20 @@ def test_session_configuration_api_lists_available_choices_and_persists_switches
             connection,
             "/api/sessions/session-1/configuration",
             {
-                "providerName": "beta",
-                "model": "beta-reasoner",
+                "providerName": "alpha",
+                "model": "alpha-large",
                 "thinkingLevel": "high",
             },
         )
 
         assert status == 200
-        assert updated["session"]["providerName"] == "beta"
-        assert updated["session"]["model"] == "beta-reasoner"
+        assert updated["session"]["providerName"] == "alpha"
+        assert updated["session"]["model"] == "alpha-large"
         assert updated["configuration"]["thinkingLevel"] == "high"
         stored = manager.get_session(record.id)
         assert stored is not None
-        assert stored.provider_name == "beta"
-        assert stored.model == "beta-reasoner"
+        assert stored.provider_name == "alpha"
+        assert stored.model == "alpha-large"
         entry_types = [
             json.loads(line)["type"]
             for line in record.path.read_text(encoding="utf-8").splitlines()
@@ -662,8 +1085,8 @@ def test_session_configuration_api_lists_available_choices_and_persists_switches
             connection,
             "/api/sessions/session-1/configuration",
             {
-                "providerName": "beta",
-                "model": "beta-reasoner",
+                "providerName": "alpha",
+                "model": "alpha-large",
                 "thinkingLevel": "low",
             },
         )
@@ -675,7 +1098,7 @@ def test_session_configuration_api_lists_available_choices_and_persists_switches
             "/api/sessions/session-1/configuration",
             {
                 "providerName": "beta",
-                "model": "not-configured",
+                "model": "beta-reasoner",
                 "thinkingLevel": "high",
             },
         )

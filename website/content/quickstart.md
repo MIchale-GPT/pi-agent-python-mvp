@@ -142,10 +142,11 @@ To open indexed sessions and run them from a local browser, run:
 tau-web
 ```
 
-Create a session by choosing its project directory, Provider, and model, or
-select an existing session. Wait for the live event connection, then use the
-composer to send a task or cancel the active run. The top-bar menu also renames,
-exports, and safely deletes the current session. See the
+Create a session by choosing its project directory, reviewing the single
+Provider connection's URL/key/model, and selecting a supported session-level
+Thinking value—or select an existing session. Wait for the live event
+connection, then use the composer to send a task or cancel the active run. The
+top-bar menu also renames, exports, and safely deletes the current session. See the
 [local web workspace guide]({{< relref "./guides/web.md" >}}) for current
 limitations and network-safety options.
 

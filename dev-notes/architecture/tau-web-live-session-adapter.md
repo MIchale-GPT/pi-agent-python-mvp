@@ -10,16 +10,17 @@ uv run tau-web
 
 The A / **Trace Workbench** direction now has a complete first vertical slice:
 
-- the new-session modal reads the configured providers/models, accepts an
-  existing project directory, creates the indexed record, and immediately
-  opens its live event stream;
+- the new-session modal selects one credentialed OpenAI-compatible connection,
+  lets the user edit its URL/key/model and select supported session Thinking,
+  accepts an existing project directory, creates the indexed record, and
+  immediately opens its live event stream;
 - the browser lists real session metadata from `SessionManager`;
 - selecting a session reads its JSONL file and renders only the active branch;
 - the composer submits prompts to a real `CodingSession`;
 - coding-session events stream to the browser over server-sent events (SSE);
 - the active run can be cancelled from the composer;
-- an idle session can switch among configured providers, models, and thinking
-  levels without changing Tau's global default;
+- an idle session can switch models and thinking levels within that connection
+  without changing Tau's global default;
 - `/help`, `/compact`, `/session`, `/system`, and `/hotkeys` enter through the
   composer instead of becoming provider prompts;
 - active runs accept explicit steering and follow-up messages, expose both
@@ -56,6 +57,7 @@ important: browser code is a frontend, not a second implementation of Tau.
 ```text
 Browser
     ├─ GET  /api/session-options
+    ├─ POST /api/provider
     ├─ GET  /api/sessions
     ├─ POST /api/sessions
     ├─ GET  /api/sessions/<id>
@@ -90,14 +92,24 @@ Static assets are bundled under `tau_coding/data/web/`, so the installed
 
 ## Session lifecycle operations
 
-`GET /api/session-options` turns the durable `ProviderSettings` into the small
-provider/model catalog needed by the creation modal. The directory field starts
-with the server process's current directory and offers directories from recent
-sessions. It remains editable because a browser directory input cannot reveal
-an absolute path on the machine running the server. The server expands `~`,
-resolves the submitted path, requires it to be an existing directory, and
-validates the provider/model pair again before calling
-`SessionManager.create_session()`.
+`GET /api/session-options` selects one credentialed OpenAI-compatible Provider
+from the durable `ProviderSettings`; it does not send the complete built-in
+catalog to the browser. `POST /api/provider` updates that connection's URL,
+credential, and single model name in a dedicated `tau-web` Provider entry.
+Existing keys are never returned to the browser, and the source Provider plus
+Tau's global default remain unchanged. Editing the source URL/model produces a
+generic Chat Completions connection, while unchanged values keep validated
+capabilities. Model URL overrides are always removed so the configured URL
+remains authoritative; model API overrides survive only for unchanged source
+values. If no compatible source exists, the adapter returns an editable
+synthetic `tau-web` setup target.
+
+The directory field starts with the server process's current directory and
+offers directories from recent sessions. It remains editable because a browser
+directory input cannot reveal an absolute path on the machine running the
+server. The server expands `~`, resolves the submitted path, requires it to be
+an existing directory, and validates the provider/model/thinking combination
+again before calling `SessionManager.create_session()`.
 
 Rename updates only indexed metadata. Export reads the complete JSONL entry
 sequence on the runtime loop and renders the existing self-contained session

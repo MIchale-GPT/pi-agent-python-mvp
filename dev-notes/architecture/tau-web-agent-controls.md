@@ -5,8 +5,8 @@
 Tau Web's second vertical slice adds the controls needed around an active
 coding-agent run:
 
-- idle sessions can switch to configured Provider/model pairs and supported
-  thinking levels;
+- idle sessions can switch models and supported thinking levels within Tau
+  Web's single Provider connection;
 - the composer dispatches `/help`, `/compact`, `/session`, `/system`, and
   `/hotkeys`;
 - running sessions accept explicit steering and follow-up messages, show both
@@ -45,13 +45,50 @@ only consumes events and sends explicit choices.
 ## Session-local configuration
 
 The configuration endpoint returns the current Provider, model, thinking level,
-and only the choices present in `ProviderSettings`. A change is allowed only
-while the session is idle.
+and only the single OpenAI-compatible connection selected for Tau Web. A change
+is allowed only while the session is idle.
 
 The selected model and thinking level are appended to the active JSONL branch,
 and `SessionManager` metadata records the active Provider/model. Web switches
 pass `persist_default=False`, so changing one browser session does not silently
 replace Tau's global default Provider, model, or thinking level.
+
+## One editable Web Provider connection
+
+The new-session modal no longer renders Tau's complete built-in Provider
+catalog. The Web adapter selects one OpenAI-compatible connection:
+
+1. use the configured default when it has a stored or environment credential;
+2. otherwise use the first credentialed OpenAI-compatible Provider;
+3. if none is credentialed, show the configured default as the setup target.
+
+The browser may update that connection's base URL, API key, and single model
+name through `POST /api/provider`. The first update clones the selected
+configuration into a dedicated `tau-web` Provider; later updates replace only
+that dedicated entry. The source Provider, `default_provider`, its model
+metadata, and scoped models remain unchanged for CLI/TUI and older sessions.
+When no OpenAI-compatible source exists, the adapter synthesizes the same
+editable setup target instead of failing the new-session form.
+
+An unchanged source URL/model keeps its validated transport and capability
+declarations. Editing either switches the dedicated entry to
+`openai-completions` and clears source headers and compatibility flags.
+Model-level URL overrides are always cleared so the user-entered URL cannot be
+bypassed by hidden catalog metadata. A model API override is retained only when
+the source URL/model are unchanged.
+
+The key is written through `FileCredentialStore`; read payloads contain only
+`apiKeyConfigured`, never the secret. A stored source API key is copied
+internally into the dedicated credential on first save, while environment keys
+continue to work through the cloned `api_key_env`. OAuth credentials are not
+reported as editable API keys or copied to the renamed connection, because
+refresh is registered against the original Provider id.
+
+New-session Thinking uses the selected Provider/model's declared levels.
+Choosing a level eagerly checkpoints the empty session's initial model and
+thinking entries, so the choice survives a restart before the first prompt.
+Unsupported Providers keep the control visible but disabled rather than sending
+an unvalidated reasoning parameter.
 
 ## Commands and queues
 

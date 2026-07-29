@@ -671,6 +671,91 @@ def upsert_openai_compatible_provider(
     return upsert_provider(settings, provider, set_default=set_default)
 
 
+def set_openai_compatible_provider_connection(
+    settings: ProviderSettings,
+    *,
+    provider_name: str,
+    source_provider_name: str | None = None,
+    base_url: str,
+    model: str,
+) -> ProviderSettings:
+    """Upsert a generic single-model connection seeded from credential settings."""
+    source_name = source_provider_name or provider_name
+    try:
+        source = settings.get_provider(source_name)
+    except ProviderConfigError:
+        if source_name != provider_name:
+            raise
+        source = OpenAICompatibleProviderConfig(
+            name=source_name,
+            credential_name=source_name,
+        )
+    if not isinstance(source, OpenAICompatibleProviderConfig):
+        raise ProviderConfigError(f"Provider is not OpenAI-compatible: {source_name}")
+    normalized_base_url = base_url.strip().rstrip("/")
+    normalized_model = model.strip()
+    if not normalized_base_url:
+        raise ProviderConfigError("Provider base URL must not be empty")
+    if not normalized_model:
+        raise ProviderConfigError("Provider model must not be empty")
+
+    preserves_source_capabilities = (
+        normalized_base_url == source.base_url.rstrip("/") and normalized_model in source.models
+    )
+    source_metadata = source.model_metadata.get(normalized_model)
+    normalized_metadata = (
+        {
+            normalized_model: replace(
+                source_metadata,
+                base_url=None,
+            )
+        }
+        if preserves_source_capabilities and source_metadata is not None
+        else {}
+    )
+    updated_provider = replace(
+        source,
+        name=provider_name,
+        base_url=normalized_base_url,
+        api=source.api if preserves_source_capabilities else "openai-completions",
+        credential_name=provider_name,
+        models=(normalized_model,),
+        default_model=normalized_model,
+        context_windows=(
+            {
+                normalized_model: source.context_windows[normalized_model],
+            }
+            if preserves_source_capabilities and normalized_model in source.context_windows
+            else {}
+        ),
+        headers=dict(source.headers) if preserves_source_capabilities else {},
+        compat=dict(source.compat) if preserves_source_capabilities else {},
+        model_metadata=normalized_metadata,
+        thinking_levels=source.thinking_levels if preserves_source_capabilities else None,
+        thinking_models=source.thinking_models if preserves_source_capabilities else (),
+        thinking_default=source.thinking_default if preserves_source_capabilities else None,
+        thinking_parameter=source.thinking_parameter if preserves_source_capabilities else None,
+        thinking_defaults=(
+            {
+                normalized_model: source.thinking_defaults[normalized_model],
+            }
+            if preserves_source_capabilities and normalized_model in source.thinking_defaults
+            else {}
+        ),
+    )
+    target_exists = any(item.name == provider_name for item in settings.providers)
+    providers = tuple(
+        updated_provider if item.name == provider_name else item for item in settings.providers
+    )
+    if not target_exists:
+        providers = (*providers, updated_provider)
+    return ProviderSettings(
+        default_provider=settings.default_provider,
+        providers=providers,
+        scoped_models=settings.scoped_models,
+    )
+
+
 def upsert_provider(
     settings: ProviderSettings,
     provider: ProviderConfig,
@@ -1623,8 +1708,24 @@ def provider_has_usable_credentials(
             and get_oauth(provider.credential_name) is not None
         ):
             return True
-        if credential_reader.get(provider.credential_name):
-            return True
+    return provider_has_usable_api_key(
+        provider,
+        credential_reader=credential_reader,
+    )
+
+
+def provider_has_usable_api_key(
+    provider: ProviderConfig,
+    *,
+    credential_reader: CredentialReader | None = None,
+) -> bool:
+    """Return whether a provider has a stored or environment API key."""
+    if (
+        provider.credential_name
+        and credential_reader is not None
+        and credential_reader.get(provider.credential_name)
+    ):
+        return True
     return bool(environ.get(provider.api_key_env))
 
 

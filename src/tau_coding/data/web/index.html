@@ -343,14 +343,51 @@
           <datalist id="project-directory-options"></datalist>
           <div class="field-grid">
             <label class="field">
-              <span>Provider</span>
-              <select id="new-session-provider" name="providerName" required></select>
+              <span>唯一 Provider</span>
+              <input id="new-session-provider" name="providerName" type="text" readonly />
             </label>
             <label class="field">
-              <span>模型</span>
-              <select id="new-session-model" name="model" required></select>
+              <span>URL</span>
+              <input
+                id="new-session-provider-url"
+                name="baseUrl"
+                type="url"
+                autocomplete="url"
+                placeholder="http://127.0.0.1:8000/v1"
+                required
+              />
             </label>
           </div>
+          <div class="field-grid">
+            <label class="field">
+              <span>API Key</span>
+              <input
+                id="new-session-api-key"
+                name="apiKey"
+                type="password"
+                autocomplete="new-password"
+                placeholder="留空则保留现有 Key"
+              />
+              <small id="new-session-api-key-help">读取配置后显示凭据状态。</small>
+            </label>
+            <label class="field">
+              <span>模型名称</span>
+              <input
+                id="new-session-model"
+                name="model"
+                type="text"
+                autocomplete="off"
+                required
+              />
+            </label>
+          </div>
+          <label class="field">
+            <span>Thinking（会话级）</span>
+            <select id="new-session-thinking" name="thinkingLevel"></select>
+            <small id="new-session-thinking-help">
+              每个新会话独立保存，不会修改 Provider 的全局默认值。
+            </small>
+          </label>
           <details class="advanced-settings">
             <summary>高级生成设置</summary>
             <div class="advanced-settings-body">

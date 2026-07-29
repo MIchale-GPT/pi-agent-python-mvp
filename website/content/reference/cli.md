@@ -102,8 +102,9 @@ tau-web [--host HOST] [--port PORT] [--no-open]
 ```
 
 `tau-web` binds to `127.0.0.1:8080` and opens the A-theme Trace Workbench by
-default. It creates sessions from a project directory and configured
-Provider/model, manages indexed sessions (rename, HTML/JSONL export, confirmed
+default. It exposes one credentialed OpenAI-compatible connection whose
+URL/key/model can be edited while creating a session, supports a session-level
+Thinking choice, manages indexed sessions (rename, HTML/JSONL export, confirmed
 delete), accepts prompts, streams their events over SSE, supports cancellation,
 and reloads the durable active JSONL branch after each run. Non-loopback hosts
 are rejected until Tau Web has application-level authentication and a reviewed

@@ -24,10 +24,45 @@ To start fresh, select **New session** in the sidebar:
 
 1. choose a recent project directory or enter another directory path on the
    machine running `tau-web`;
-2. select a configured Provider;
-3. select one of that Provider's configured models;
+2. review or edit the single Provider connection's **URL**, **API Key**, and
+   **model name**;
+3. choose a session-level **Thinking** value when the Provider declares
+   supported levels;
 4. optionally open **Advanced settings** to choose a temperature;
 5. select **Create and enter**.
+
+Tau Web deliberately exposes one OpenAI-compatible connection instead of the
+complete built-in Provider catalog. It prefers the configured default when that
+Provider has usable credentials; otherwise it uses the first credentialed
+OpenAI-compatible Provider. If no connection is credentialed yet, it displays
+the configured default so you can add a key. If Tau has no OpenAI-compatible
+Provider at all, the form starts with an editable `tau-web` setup target.
+
+On the first save, Tau clones those editable values into a dedicated
+`tau-web` Provider entry. Later Web sessions reuse that entry. Editing it does
+not remove models from the source Provider, change Tau's global default, or
+alter CLI/TUI sessions that use the original Provider.
+
+When the URL and model still match the source, Tau preserves its validated
+transport and capability declarations. Changing either turns the dedicated
+entry into a generic OpenAI-compatible Chat Completions connection and drops
+source headers and compatibility flags. Model-level URL overrides are always
+removed, so the URL shown in this form is the endpoint that will actually
+receive requests; a validated model API override is retained only for an
+unchanged URL/model. Providers that require another transport remain available
+in the CLI/TUI but are not configurable through this three-field Web form.
+
+The API Key field never displays an existing secret. The dialog reports only
+whether a key is configured: leave the field empty to preserve the current
+credential, or enter a value to replace it. Tau stores entered keys in
+`~/.tau/credentials.json` with user-only file permissions.
+OAuth subscriptions are not copied into the dedicated connection; an
+OAuth-only source therefore appears as needing an API key in this form.
+
+Thinking is a per-session choice and is persisted before the first prompt. If
+the selected Provider/model does not declare `thinking_levels`, the control
+remains visible but disabled; Tau does not invent a reasoning parameter that
+the endpoint may reject.
 
 Temperature defaults to **Auto**, which means Tau omits the request parameter
 and lets the provider or model choose its default. **Precise** sends `0`;
@@ -37,8 +72,8 @@ They remain disabled for Codex, Responses API models, and providers whose
 adapter does not safely support the parameter.
 
 Tau validates the directory and provider/model pair, creates the session under
-the normal Tau session home, and immediately opens it. Provider credentials
-still need to be configured before that session can run a task.
+the normal Tau session home, and immediately opens it. A usable Provider
+credential is required before the connection can be saved.
 
 Existing indexed sessions remain in the sidebar. Selecting one loads its active
 JSONL branch.
@@ -100,17 +135,18 @@ implicitly.
 
 Open the current-session menu in the top bar to:
 
-- change the current session's configured **Provider**, **model**, and
-  **Thinking level**;
+- change the current session's **model** and **Thinking level** within Tau Web's
+  single Provider connection;
 - **Rename** the indexed session;
 - **Export HTML** for a self-contained, human-readable view of the complete
   session tree;
 - **Export JSONL** for the complete durable entry sequence;
 - **Delete session**.
 
-Provider/model/thinking changes are available only while the session is idle.
-The choices come from the current Tau provider configuration and are appended
-to the session's durable branch; they do not replace the global default model.
+Model/thinking changes are available only while the session is idle. The
+choices come from the single Tau Web Provider configuration and are appended to
+the session's durable branch; they do not replace the global default model or
+thinking level.
 
 Delete is permanent: it removes the index entry and the session's JSONL file.
 The dialog requires typing `DELETE`, and Tau refuses deletion while that session

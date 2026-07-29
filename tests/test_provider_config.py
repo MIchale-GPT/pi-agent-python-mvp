@@ -20,6 +20,7 @@ from tau_coding.provider_config import (
     load_provider_settings,
     openai_compatible_config_from_provider,
     provider_default_thinking_level,
+    provider_has_usable_api_key,
     provider_has_usable_credentials,
     provider_model_supports_images,
     provider_settings_from_json,
@@ -29,6 +30,7 @@ from tau_coding.provider_config import (
     resolve_startup_thinking_level,
     save_provider_settings,
     set_default_provider_model,
+    set_openai_compatible_provider_connection,
     set_provider_thinking_level,
     upsert_openai_compatible_provider,
 )
@@ -567,6 +569,132 @@ def test_upsert_openai_compatible_provider_replaces_and_sets_default() -> None:
     assert replaced.scoped_models == settings.scoped_models
 
 
+def test_set_openai_compatible_provider_connection_removes_endpoint_overrides() -> None:
+    settings = ProviderSettings(
+        default_provider="local",
+        providers=(
+            OpenAICompatibleProviderConfig(
+                name="local",
+                base_url="http://old.example/v1",
+                api="openai-responses",
+                models=("qwen", "llama"),
+                default_model="qwen",
+                context_windows={"qwen": 32_000, "llama": 64_000},
+                headers={"X-Source": "secret"},
+                compat={"supportsStore": True},
+                model_metadata={
+                    "qwen": ProviderModelMetadata(reasoning=False),
+                    "llama": ProviderModelMetadata(
+                        api="openai-responses",
+                        base_url="http://model-override.example/v1",
+                        reasoning=True,
+                    ),
+                },
+                thinking_levels=("off", "high"),
+                thinking_default="high",
+                thinking_parameter="reasoning_effort",
+                thinking_defaults={"qwen": "off", "llama": "high"},
+            ),
+        ),
+        scoped_models=(
+            ScopedModelConfig(provider="local", model="qwen"),
+            ScopedModelConfig(provider="local", model="llama"),
+        ),
+    )
+
+    updated = set_openai_compatible_provider_connection(
+        settings,
+        provider_name="tau-web",
+        source_provider_name="local",
+        base_url="http://new.example/v1/",
+        model="llama",
+    )
+
+    provider = updated.get_provider("tau-web")
+    assert provider.base_url == "http://new.example/v1"
+    assert provider.api == "openai-completions"
+    assert provider.credential_name == "tau-web"
+    assert provider.models == ("llama",)
+    assert provider.default_model == "llama"
+    assert provider.context_windows == {}
+    assert provider.headers == {}
+    assert provider.compat == {}
+    assert provider.model_metadata == {}
+    assert provider.thinking_levels is None
+    assert provider.thinking_models == ()
+    assert provider.thinking_default is None
+    assert provider.thinking_parameter is None
+    assert provider.thinking_defaults == {}
+    assert updated.default_provider == "local"
+    assert updated.get_provider("local") == settings.get_provider("local")
+    assert updated.scoped_models == settings.scoped_models
+
+    replaced = set_openai_compatible_provider_connection(
+        updated,
+        provider_name="tau-web",
+        source_provider_name="tau-web",
+        base_url="http://newer.example/v1",
+        model="other-model",
+    )
+
+    replacement = replaced.get_provider("tau-web")
+    assert replacement.base_url == "http://newer.example/v1"
+    assert replacement.models == ("other-model",)
+    assert replacement.model_metadata == {}
+    assert replacement.context_windows == {}
+    assert len([item for item in replaced.providers if item.name == "tau-web"]) == 1
+    assert replaced.default_provider == "local"
+    assert replaced.get_provider("local") == settings.get_provider("local")
+    assert replaced.scoped_models == settings.scoped_models
+
+
+def test_set_openai_compatible_provider_connection_preserves_matching_capabilities() -> None:
+    source = OpenAICompatibleProviderConfig(
+        name="local",
+        base_url="http://local.example/v1",
+        api="openai-responses",
+        models=("reasoner",),
+        default_model="reasoner",
+        headers={"X-Local": "enabled"},
+        compat={"supportsStore": True},
+        model_metadata={
+            "reasoner": ProviderModelMetadata(
+                api="openai-completions",
+                base_url="http://hidden-override.example/v1",
+                reasoning=True,
+            )
+        },
+        thinking_levels=("off", "high"),
+        thinking_default="high",
+        thinking_parameter="reasoning_effort",
+        thinking_defaults={"reasoner": "high"},
+    )
+    settings = ProviderSettings(
+        default_provider="local",
+        providers=(source,),
+    )
+
+    updated = set_openai_compatible_provider_connection(
+        settings,
+        provider_name="tau-web",
+        source_provider_name="local",
+        base_url="http://local.example/v1",
+        model="reasoner",
+    )
+
+    provider = updated.get_provider("tau-web")
+    assert provider.api == "openai-responses"
+    assert provider.headers == source.headers
+    assert provider.compat == source.compat
+    assert provider.thinking_levels == ("off", "high")
+    assert provider.thinking_default == "high"
+    assert provider.thinking_parameter == "reasoning_effort"
+    assert provider.thinking_defaults == {"reasoner": "high"}
+    assert provider.model_metadata["reasoner"].reasoning is True
+    assert provider.model_metadata["reasoner"].api == "openai-completions"
+    assert provider.model_metadata["reasoner"].base_url is None
+
+
 def test_resolve_provider_selection_uses_configured_defaults() -> None:
     settings = ProviderSettings(
         default_provider="local",
@@ -936,10 +1064,13 @@ def test_provider_has_usable_credentials_checks_stored_key_and_env(
 
     assert not provider_has_usable_credentials(provider, credential_reader=EmptyCredentials())
     assert provider_has_usable_credentials(provider, credential_reader=StoredCredentials())
+    assert not provider_has_usable_api_key(provider, credential_reader=EmptyCredentials())
+    assert provider_has_usable_api_key(provider, credential_reader=StoredCredentials())
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "env-key")
 
     assert provider_has_usable_credentials(provider, credential_reader=EmptyCredentials())
+    assert provider_has_usable_api_key(provider, credential_reader=EmptyCredentials())
 
 
 def test_anthropic_config_from_provider_uses_stored_credential(

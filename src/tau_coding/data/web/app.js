@@ -14,7 +14,7 @@ const state = {
   settledRunIds: new Set(),
 };
 const {
-  createAndEnterSession,
+  configureAndCreateSession,
   resolveTemperature,
   shouldActivateAcceptedRun,
 } = globalThis.TauSessionActions;
@@ -46,7 +46,12 @@ const newSessionDialog = document.querySelector("#new-session-dialog");
 const newSessionForm = document.querySelector("#new-session-form");
 const newSessionCwd = document.querySelector("#new-session-cwd");
 const newSessionProvider = document.querySelector("#new-session-provider");
+const newSessionProviderUrl = document.querySelector("#new-session-provider-url");
+const newSessionApiKey = document.querySelector("#new-session-api-key");
+const newSessionApiKeyHelp = document.querySelector("#new-session-api-key-help");
 const newSessionModel = document.querySelector("#new-session-model");
+const newSessionThinking = document.querySelector("#new-session-thinking");
+const newSessionThinkingHelp = document.querySelector("#new-session-thinking-help");
 const newSessionTemperatureMode = document.querySelector("#new-session-temperature-mode");
 const newSessionTemperatureField = document.querySelector("#new-session-temperature-field");
 const newSessionTemperature = document.querySelector("#new-session-temperature");
@@ -785,31 +790,13 @@ function setFormError(id, message = "") {
   error.hidden = !message;
 }
 
-function populateModelChoices(selectedModel) {
-  const provider = state.sessionOptions?.providers.find(
-    (item) => item.name === newSessionProvider.value,
-  );
-  newSessionModel.replaceChildren();
-  (provider?.models || []).forEach((model) => {
-    const option = element("option", null, model);
-    option.value = model;
-    newSessionModel.append(option);
-  });
-  const preferredModel =
-    selectedModel && provider?.models.includes(selectedModel)
-      ? selectedModel
-      : provider?.defaultModel;
-  if (preferredModel) newSessionModel.value = preferredModel;
-  syncTemperatureControls();
-}
-
 function selectedTemperatureCapability() {
-  const provider = state.sessionOptions?.providers.find(
-    (item) => item.name === newSessionProvider.value,
-  );
+  const provider = state.sessionOptions?.provider;
   const range = provider?.temperatureRange || { min: 0, max: 2, step: "any" };
   return {
-    supported: Boolean(provider?.temperatureModels?.includes(newSessionModel.value)),
+    supported: Boolean(
+      provider?.temperatureSupported && provider.model === newSessionModel.value.trim(),
+    ),
     min: range.min,
     max: range.max,
     step: range.step,
@@ -832,8 +819,40 @@ function syncTemperatureControls() {
     : "该模型由服务端控制随机性，Tau 不会发送温度参数。";
 }
 
+function populateThinkingChoices(select, levels, selectedLevel, unavailableText) {
+  select.replaceChildren();
+  levels.forEach((level) => {
+    const option = element("option", null, level);
+    option.value = level;
+    select.append(option);
+  });
+  if (!levels.length) {
+    const option = element("option", null, unavailableText);
+    option.value = "";
+    select.append(option);
+  }
+  select.disabled = !levels.length;
+  if (levels.includes(selectedLevel)) select.value = selectedLevel;
+}
+
+function populateNewSessionThinking(provider, selectedLevel) {
+  const preferredLevel = provider.thinkingLevels.includes(selectedLevel)
+    ? selectedLevel
+    : provider.defaultThinkingLevel;
+  populateThinkingChoices(
+    newSessionThinking,
+    provider.thinkingLevels,
+    preferredLevel,
+    "当前连接不支持 Thinking",
+  );
+  newSessionThinkingHelp.textContent = provider.thinkingLevels.length
+    ? "会话级选择会随新会话保存，不会改动 Provider 的全局默认值。"
+    : "当前 Provider/模型未声明可调 Thinking；该会话将使用服务端行为。";
+}
+
 function populateSessionOptions(options) {
   state.sessionOptions = options;
+  const provider = options.provider;
   const directories = document.querySelector("#project-directory-options");
   directories.replaceChildren();
   options.recentProjectDirectories.forEach((directory) => {
@@ -845,15 +864,17 @@ function populateSessionOptions(options) {
     newSessionCwd.value = options.defaultProjectDirectory;
   }
 
-  newSessionProvider.replaceChildren();
-  options.providers.forEach((provider) => {
-    const option = element("option", null, provider.name);
-    option.value = provider.name;
-    newSessionProvider.append(option);
-  });
-  newSessionProvider.value = options.defaultProvider;
+  newSessionProvider.value = provider.name;
+  newSessionProviderUrl.value = provider.baseUrl;
+  newSessionModel.value = provider.model;
+  newSessionApiKey.value = "";
+  newSessionApiKey.required = !provider.apiKeyConfigured;
+  newSessionApiKeyHelp.textContent = provider.apiKeyConfigured
+    ? "已配置凭据；留空会保留现有 Key，填写则替换。"
+    : "尚未配置凭据；创建会话前必须填写 Key。";
+  populateNewSessionThinking(provider, provider.defaultThinkingLevel);
   newSessionTemperatureMode.value = "auto";
-  populateModelChoices();
+  syncTemperatureControls();
 }
 
 async function loadSessionOptions() {
@@ -877,14 +898,12 @@ function selectedSessionProviderConfiguration() {
 function populateSessionThinking(selectedLevel) {
   const provider = selectedSessionProviderConfiguration();
   const levels = provider?.thinkingLevels?.[sessionModel.value] || [];
-  sessionThinking.replaceChildren();
-  levels.forEach((level) => {
-    const option = element("option", null, level);
-    option.value = level;
-    sessionThinking.append(option);
-  });
-  sessionThinking.disabled = !levels.length;
-  if (levels.includes(selectedLevel)) sessionThinking.value = selectedLevel;
+  populateThinkingChoices(
+    sessionThinking,
+    levels,
+    selectedLevel,
+    "当前选择不支持 Thinking",
+  );
   sessionThinkingHelp.textContent = levels.length
     ? `可用强度：${levels.join("、")}`
     : "当前选择的 Provider/模型不支持 thinking。";
@@ -898,7 +917,10 @@ function populateSessionModels(selectedModel, selectedThinking) {
     option.value = model;
     sessionModel.append(option);
   });
-  if (provider?.models.includes(selectedModel)) sessionModel.value = selectedModel;
+  const preferredModel = provider?.models.includes(selectedModel)
+    ? selectedModel
+    : provider?.defaultModel;
+  if (provider?.models.includes(preferredModel)) sessionModel.value = preferredModel;
   populateSessionThinking(selectedThinking);
 }
 
@@ -911,8 +933,16 @@ function populateSessionSettings() {
     option.value = provider.name;
     sessionProvider.append(option);
   });
-  sessionProvider.value = configuration.providerName;
-  populateSessionModels(configuration.model, configuration.thinkingLevel);
+  const currentProviderAvailable = configuration.providers.some(
+    (provider) => provider.name === configuration.providerName,
+  );
+  sessionProvider.value = currentProviderAvailable
+    ? configuration.providerName
+    : configuration.providers[0]?.name || "";
+  populateSessionModels(
+    currentProviderAvailable ? configuration.model : null,
+    currentProviderAvailable ? configuration.thinkingLevel : null,
+  );
 }
 
 async function loadSessions() {
@@ -966,8 +996,8 @@ document.querySelector("#new-session-button").addEventListener("click", async ()
   }
 });
 
-newSessionProvider.addEventListener("change", () => populateModelChoices());
 newSessionModel.addEventListener("change", syncTemperatureControls);
+newSessionModel.addEventListener("input", syncTemperatureControls);
 newSessionTemperatureMode.addEventListener("change", syncTemperatureControls);
 
 sessionSettingsButton.addEventListener("click", () => {
@@ -1014,9 +1044,18 @@ sessionSettingsForm.addEventListener("submit", async (event) => {
 newSessionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const cwd = newSessionCwd.value.trim();
-  const providerName = newSessionProvider.value;
-  const model = newSessionModel.value;
-  if (!cwd || !providerName || !model || createSessionSubmit.disabled) return;
+  const baseUrl = newSessionProviderUrl.value.trim();
+  const model = newSessionModel.value.trim();
+  const apiKey = newSessionApiKey.value.trim();
+  if (
+    !cwd ||
+    !baseUrl ||
+    !model ||
+    (!state.sessionOptions?.provider.apiKeyConfigured && !apiKey) ||
+    createSessionSubmit.disabled
+  ) {
+    return;
+  }
   let temperature;
   try {
     temperature = resolveTemperature(
@@ -1033,9 +1072,21 @@ newSessionForm.addEventListener("submit", async (event) => {
   createSessionSubmit.textContent = "正在创建…";
   setFormError("#new-session-error");
   try {
-    await createAndEnterSession(
-      { cwd, providerName, model, temperature },
+    await configureAndCreateSession(
       {
+        cwd,
+        connection: { baseUrl, apiKey, model },
+        thinkingLevel: newSessionThinking.disabled ? null : newSessionThinking.value,
+        temperature,
+      },
+      {
+        updateProvider: async (connection) => {
+          const payload = await postJson("/api/provider", connection);
+          state.sessionOptions.provider = payload.provider;
+          populateNewSessionThinking(payload.provider, newSessionThinking.value);
+          newSessionApiKey.value = "";
+          return payload;
+        },
         createSession: (options) => postJson("/api/sessions", options),
         registerSession: (session) => {
           state.sessions = [
