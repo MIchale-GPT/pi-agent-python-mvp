@@ -65,12 +65,12 @@ def default_session_export_artifact_path(
 def export_session_jsonl(entries: Sequence[SessionEntry], output_path: Path) -> Path:
     """Write session entries to a JSONL export and return its path."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(_session_jsonl_text(entries), encoding="utf-8")
+    output_path.write_text(render_session_jsonl(entries), encoding="utf-8")
     return output_path
 
 
-def _session_jsonl_text(entries: Sequence[SessionEntry]) -> str:
-    """Serialize session entries to JSONL text (one JSON object per line)."""
+def render_session_jsonl(entries: Sequence[SessionEntry]) -> str:
+    """Render session entries as JSONL text without writing an artifact."""
     lines = [entry.model_dump_json() for entry in entries]
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -145,7 +145,7 @@ def render_session_html(
     details_html = _render_entry_details(visible_entries, active_path_ids, active_leaf_id)
     source_html = f'<p class="source">Source: <code>{_escape(source)}</code></p>' if source else ""
     generated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-    jsonl_b64 = base64.b64encode(_session_jsonl_text(entry_list).encode("utf-8")).decode("ascii")
+    jsonl_b64 = base64.b64encode(render_session_jsonl(entry_list).encode("utf-8")).decode("ascii")
     jsonl_filename = _jsonl_filename(title, source)
     tool_count = sum(1 for entry in visible_entries if _entry_filter_kind(entry) == "tool")
     event_count = sum(1 for entry in visible_entries if _entry_filter_kind(entry) == "event")

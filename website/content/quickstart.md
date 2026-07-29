@@ -136,6 +136,19 @@ tau --session <session-id>
 …or open the picker inside the TUI with `/resume`. See
 [Sessions]({{< relref "./guides/sessions.md" >}}) for resuming, branching, and exporting.
 
+To open indexed sessions and run them from a local browser, run:
+
+```bash
+tau-web
+```
+
+Create a session by choosing its project directory, Provider, and model, or
+select an existing session. Wait for the live event connection, then use the
+composer to send a task or cancel the active run. The top-bar menu also renames,
+exports, and safely deletes the current session. See the
+[local web workspace guide]({{< relref "./guides/web.md" >}}) for current
+limitations and network-safety options.
+
 ## One-shot mode
 
 Don't need the UI? Run a single prompt and get the result on stdout — handy for

@@ -4,7 +4,8 @@ description: Every Tau command-line command and flag.
 ---
 
 The `tau` command launches the interactive TUI by default; subcommands and flags
-cover everything else.
+cover everything else. The separate `tau-web` entry point starts the local
+browser workspace.
 
 ```text
 tau [OPTIONS] [PROMPT] [COMMAND] [ARGS]
@@ -35,6 +36,7 @@ features and fixes.
 | `tau --export <ref> [dest]` | Same as `tau export`, as a top-level flag |
 | `tau providers` | List configured providers and how each authenticates |
 | `tau [setup options] setup` | Create/update an OpenAI-compatible provider |
+| `tau-web` | Create, manage, and run sessions in the local Trace Workbench at `127.0.0.1:8080` |
 
 ## Options
 
@@ -84,3 +86,17 @@ tau --provider local \
 
 See also: [Slash commands]({{< relref "./slash-commands.md" >}}) (in-session) and
 [Keyboard shortcuts]({{< relref "./keybindings.md" >}}).
+
+## `tau-web`
+
+```text
+tau-web [--host HOST] [--port PORT] [--no-open]
+```
+
+`tau-web` binds to `127.0.0.1:8080` and opens the A-theme Trace Workbench by
+default. It creates sessions from a project directory and configured
+Provider/model, manages indexed sessions (rename, HTML/JSONL export, confirmed
+delete), accepts prompts, streams their events over SSE, supports cancellation,
+and reloads the durable active JSONL branch after each run. Non-loopback hosts
+are rejected until Tau Web has application-level authentication and a reviewed
+remote security boundary.

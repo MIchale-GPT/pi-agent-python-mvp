@@ -19,7 +19,8 @@ User-facing documentation lives in `website/content/` and is published at
   - `agent-loop.md`, `harness.md` — harness/loop reference notes
 - `architecture/` — per-phase implementation notes (`phase-1` … `phase-24`, plus
   hardening and feature notes). Each answers: what was added, why it exists, how
-  later phases use it.
+  later phases use it. `tau-web-live-session-adapter.md` records the selected
+  Trace Workbench direction and its HTTP/SSE-to-`CodingSession` boundary.
 - `adr/` — architecture decision records.
 - `catalog-model-safety.md` — checklist for adding providers and models to the built-in catalog safely.
 - `startup-thinking-level-fallback.md` — why startup resolves a valid thinking

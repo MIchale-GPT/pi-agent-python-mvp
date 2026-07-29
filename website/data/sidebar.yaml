@@ -12,6 +12,8 @@
   items:
     - label: The interactive session
       path: /guides/tui/
+    - label: The local web workspace
+      path: /guides/web/
     - label: Sessions
       path: /guides/sessions/
     - label: Providers & models

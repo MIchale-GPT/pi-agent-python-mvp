@@ -30,6 +30,7 @@ Issues = "https://github.com/huggingface/tau/issues"
 
 [project.scripts]
 tau = "tau_coding.cli:app"
+tau-web = "tau_coding.web:main"
 
 [dependency-groups]
 dev = [

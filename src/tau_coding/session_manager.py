@@ -207,6 +207,25 @@ class SessionManager:
         self._upsert(updated)
         return updated
 
+    def delete_session(self, session_id: str) -> CodingSessionRecord | None:
+        """Remove an indexed session and its durable transcript file."""
+        existing = self.get_session(session_id)
+        if existing is None:
+            return None
+
+        index_paths = {
+            self.index_path,
+            self.project_index_path(existing.cwd),
+            *self.paths.sessions_dir.glob("*/index.jsonl"),
+        }
+        for index_path in index_paths:
+            records = self._read_index(index_path)
+            retained = [record for record in records if record.id != session_id]
+            if len(retained) != len(records):
+                self._write_index(index_path, retained)
+        existing.path.unlink(missing_ok=True)
+        return existing
+
     def _read_index(self, path: Path) -> list[CodingSessionRecord]:
         if not path.exists():
             return []
