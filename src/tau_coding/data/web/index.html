@@ -120,6 +120,10 @@
                 <svg><use href="#i-more"></use></svg>
               </summary>
               <div class="session-menu-popover">
+                <button id="session-settings-button" type="button" disabled>
+                  <svg><use href="#i-settings"></use></svg>
+                  模型与 Thinking
+                </button>
                 <button id="rename-session-button" type="button" disabled>
                   <svg><use href="#i-edit"></use></svg>
                   重命名
@@ -171,6 +175,17 @@
 
         <footer class="composer-wrap panel">
           <form id="composer" class="composer">
+            <section id="queue-panel" class="queue-panel" aria-label="运行中消息队列" hidden>
+              <div>
+                <span>STEERING</span>
+                <ol id="steering-queue"></ol>
+              </div>
+              <div>
+                <span>FOLLOW-UP</span>
+                <ol id="follow-up-queue"></ol>
+              </div>
+              <button id="clear-queue-button" type="button">清空队列</button>
+            </section>
             <label class="sr-only" for="prompt-input">发送任务给 Tau</label>
             <textarea
               id="prompt-input"
@@ -184,6 +199,24 @@
               <span class="composer-shortcut"><kbd>Enter</kbd> 发送 · <kbd>Shift Enter</kbd> 换行</span>
               <button id="cancel-button" class="cancel-button" type="button" hidden>
                 取消
+              </button>
+              <button
+                id="follow-up-button"
+                class="queue-submit-button"
+                type="button"
+                hidden
+                title="当前运行结束后继续"
+              >
+                跟进
+              </button>
+              <button
+                id="steer-button"
+                class="queue-submit-button"
+                type="button"
+                hidden
+                title="尽快注入当前运行"
+              >
+                转向
               </button>
               <button id="send-button" class="send-button" type="submit" disabled aria-label="发送任务">
                 <svg><use href="#i-send"></use></svg>
@@ -235,6 +268,7 @@
             <dl>
               <div><dt>provider</dt><dd id="fact-provider">—</dd></div>
               <div><dt>model</dt><dd id="fact-model">—</dd></div>
+              <div><dt>thinking</dt><dd id="fact-thinking">—</dd></div>
               <div><dt>temperature</dt><dd id="fact-temperature">—</dd></div>
               <div><dt>messages</dt><dd id="fact-messages">—</dd></div>
               <div><dt>updated</dt><dd id="fact-updated">—</dd></div>
@@ -242,6 +276,44 @@
           </section>
         </div>
       </aside>
+
+    <dialog id="session-settings-dialog" class="modal">
+      <form id="session-settings-form" class="modal-card compact">
+        <header class="modal-header">
+          <div>
+            <p class="eyebrow">SESSION RUNTIME</p>
+            <h2>模型与 Thinking</h2>
+          </div>
+          <button class="icon-button dialog-close" type="button" aria-label="关闭">
+            <svg><use href="#i-close"></use></svg>
+          </button>
+        </header>
+        <div class="modal-body">
+          <div class="field-grid">
+            <label class="field">
+              <span>Provider</span>
+              <select id="session-provider" name="providerName" required></select>
+            </label>
+            <label class="field">
+              <span>模型</span>
+              <select id="session-model" name="model" required></select>
+            </label>
+          </div>
+          <label class="field">
+            <span>Thinking 强度</span>
+            <select id="session-thinking" name="thinkingLevel"></select>
+            <small id="session-thinking-help">由当前 Provider 和模型决定可用强度。</small>
+          </label>
+          <p id="session-settings-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <footer class="modal-actions">
+          <button class="secondary-button dialog-cancel" type="button">取消</button>
+          <button id="session-settings-submit" class="primary-button" type="submit">
+            应用到当前会话
+          </button>
+        </footer>
+      </form>
+    </dialog>
 
     <dialog id="new-session-dialog" class="modal">
       <form id="new-session-form" class="modal-card">
@@ -386,6 +458,37 @@
         </footer>
       </form>
     </dialog>
+
+    <dialog id="tool-authorization-dialog" class="modal tool-authorization-modal">
+      <form id="tool-authorization-form" class="modal-card compact">
+        <header class="modal-header">
+          <div>
+            <p class="eyebrow">TOOL AUTHORIZATION</p>
+            <h2>允许 Tau 执行工具？</h2>
+          </div>
+          <span class="authorization-lock"><svg><use href="#i-lock"></use></svg></span>
+        </header>
+        <div class="modal-body">
+          <div class="authorization-call">
+            <strong id="tool-authorization-name">tool</strong>
+            <pre id="tool-authorization-arguments">{}</pre>
+          </div>
+          <p>请检查工具名和参数。失去浏览器连接时，Tau 会默认拒绝执行。</p>
+          <p id="tool-authorization-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <footer class="modal-actions authorization-actions">
+          <button class="secondary-button" type="button" data-tool-decision="cancel">
+            取消本轮
+          </button>
+          <button class="secondary-button" type="button" data-tool-decision="deny">
+            拒绝
+          </button>
+          <button class="primary-button" type="button" data-tool-decision="allow">
+            允许一次
+          </button>
+        </footer>
+      </form>
+    </dialog>
     </main>
 
     <div class="toast" role="status" aria-live="polite"></div>
@@ -418,6 +521,10 @@
         <circle cx="5" cy="12" r="1.2" />
         <circle cx="12" cy="12" r="1.2" />
         <circle cx="19" cy="12" r="1.2" />
+      </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.1-2.1-1.9.9-1.7-.7L10.5 2h-3l-.7 2.2-1.7.7-1.9-.9L1.1 6.1l.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.9-.9 1.7.7.7 2.2h3l.7-2.2 1.7-.7 1.9.9 2.1-2.1-.9-1.9.7-1.7z" transform="translate(1.5 0)" />
       </symbol>
       <symbol id="i-edit" viewBox="0 0 24 24">
         <path d="m4 16-.8 4 4-.8L18.5 7.9 15.1 4.5zM13.5 6.1l3.4 3.4" />

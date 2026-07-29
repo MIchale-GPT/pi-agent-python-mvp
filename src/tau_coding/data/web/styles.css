@@ -1088,6 +1088,19 @@ pre {
   white-space: pre-wrap;
 }
 
+.command-message strong,
+.command-message pre {
+  display: block;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.command-message strong {
+  margin-bottom: 5px;
+  color: #c084fc;
+  font-family: var(--mono);
+}
+
 .empty-transcript {
   padding: 80px 20px;
   color: var(--muted);
@@ -1126,6 +1139,67 @@ pre {
 .composer:focus-within {
   border-color: color-mix(in srgb, var(--accent) 56%, var(--border));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.queue-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 10px;
+  margin: -2px -2px 9px;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+}
+
+.queue-panel[hidden] {
+  display: none;
+}
+
+.queue-panel > div {
+  min-width: 0;
+}
+
+.queue-panel > div > span {
+  color: var(--accent-strong);
+  font: 7px var(--mono);
+  letter-spacing: 0.08em;
+}
+
+.queue-panel ol {
+  display: grid;
+  gap: 3px;
+  margin: 5px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queue-panel li {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-panel li.queue-empty {
+  color: var(--dim);
+}
+
+#clear-queue-button {
+  align-self: center;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 8px var(--mono);
+  cursor: pointer;
+}
+
+#clear-queue-button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .composer textarea {
@@ -1188,6 +1262,22 @@ kbd {
   cursor: pointer;
   font-family: var(--mono);
   font-size: 8px;
+}
+
+.queue-submit-button {
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--accent);
+  cursor: pointer;
+  font: 8px var(--mono);
+}
+
+.queue-submit-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .send-button {
@@ -1644,6 +1734,54 @@ kbd {
   color: #fb8585;
 }
 
+.authorization-lock {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  border-radius: 9px;
+  color: var(--warning);
+}
+
+.authorization-call {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.authorization-call strong {
+  display: block;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--warning);
+  font: 11px var(--mono);
+}
+
+.authorization-call pre {
+  max-height: 240px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.tool-authorization-modal .modal-body > p:not(.form-error) {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.authorization-actions .secondary-button:first-child {
+  margin-right: auto;
+  color: #fb8585;
+}
+
 .danger-warning {
   display: flex;
   align-items: flex-start;
@@ -1798,6 +1936,14 @@ kbd {
 
   .composer-shortcut {
     display: none;
+  }
+
+  .queue-panel {
+    grid-template-columns: 1fr;
+  }
+
+  #clear-queue-button {
+    justify-self: start;
   }
 
   .modal {

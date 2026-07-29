@@ -18,6 +18,14 @@ The A / **Trace Workbench** direction now has a complete first vertical slice:
 - the composer submits prompts to a real `CodingSession`;
 - coding-session events stream to the browser over server-sent events (SSE);
 - the active run can be cancelled from the composer;
+- an idle session can switch among configured providers, models, and thinking
+  levels without changing Tau's global default;
+- `/help`, `/compact`, `/session`, `/system`, and `/hotkeys` enter through the
+  composer instead of becoming provider prompts;
+- active runs accept explicit steering and follow-up messages, expose both
+  queues, and let the browser clear work that has not run;
+- every tool call waits for an allow, deny, or cancel decision from a connected
+  browser, with denial as the disconnected or timed-out default;
 - a completed or cancelled turn is reloaded from durable JSONL, so the
   transcript displayed after a run is the same branch Tau will resume;
 - tool calls, tool results, thinking blocks, compaction summaries, and branch
@@ -55,6 +63,9 @@ Browser
     ├─ GET  /api/sessions/<id>/events       (SSE)
     ├─ POST /api/sessions/<id>/messages
     ├─ POST /api/sessions/<id>/cancel
+    ├─ POST /api/sessions/<id>/queue/clear
+    ├─ POST /api/sessions/<id>/configuration
+    ├─ POST /api/sessions/<id>/tool-authorizations/<request-id>
     ├─ POST /api/sessions/<id>/rename
     └─ DELETE /api/sessions/<id>
              ↓
@@ -69,8 +80,10 @@ tau_agent.AgentHarness
 
 The existing `CodingSessionEvent` models are serialized directly with their
 Pi-compatible aliases. Synthetic Web lifecycle events (`web_connected`,
-`run_started`, `cancel_requested`, `run_error`, and `run_finished`) describe
-the adapter itself.
+`run_started`, `cancel_requested`, `command_result`,
+`configuration_updated`, `tool_authorization_requested`, `run_error`, and
+`run_finished`) describe the adapter itself. Queue events use a small browser
+payload derived from the session's canonical steering and follow-up queues.
 
 Static assets are bundled under `tau_coding/data/web/`, so the installed
 `tau-web` console script does not depend on a source checkout.
@@ -102,11 +115,12 @@ Deletion is intentionally stricter:
 
 ## Run and disconnect lifecycle
 
-A single `tau-web` process allows only one prompt per indexed session. A second
-submission to that process receives HTTP 409 instead of accidentally starting a
-concurrent agent loop. This is not a cross-process file lock: do not run the
-same session simultaneously from the TUI, another `tau-web` process, or another
-Tau process.
+A single `tau-web` process allows only one agent run per indexed session. An
+ordinary overlapping submission receives HTTP 409 instead of accidentally
+starting a concurrent loop. A submission explicitly marked `steer` or
+`follow_up` enters the matching queue on the already-running `CodingSession`.
+This is not a cross-process file lock: do not run the same session
+simultaneously from the TUI, another `tau-web` process, or another Tau process.
 
 An SSE disconnect removes that subscriber but does not cancel the coding task:
 closing a browser tab should not silently stop filesystem or tool work. The
@@ -114,6 +128,13 @@ browser reconnects automatically; if it missed the end of a run, it reloads the
 durable active branch. Server shutdown is different: it requests cancellation,
 closes all `CodingSession` instances and provider clients, then stops the async
 loop.
+
+Tool authorization is the exception to "disconnect does not cancel." The
+adapter installs a host-owned `before_tool_call` callback on each Web session.
+That callback publishes the call name and arguments, then awaits the first
+browser decision. If no subscriber exists, the last subscriber disappears, or
+the request times out, the callback returns a blocked result. It never guesses
+that a disconnected browser intended to allow the tool.
 
 ## Safety boundary
 
@@ -153,6 +174,5 @@ Then open <http://127.0.0.1:8080/>.
 
 ## Deliberately deferred
 
-Built-in slash-command dispatch, changing provider/model/thinking on an
-existing session, steering/follow-up queues, permission prompts, branch
-switching, attachments, and file browsing remain later Web capabilities.
+Branch switching, attachments, file browsing, existing-session temperature
+changes, and authenticated remote access remain later Web capabilities.

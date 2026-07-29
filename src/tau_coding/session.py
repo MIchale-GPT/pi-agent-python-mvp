@@ -10,6 +10,7 @@ from typing import Literal
 
 from tau_agent.events import AgentEndEvent, MessageEndEvent, ToolExecutionEndEvent
 from tau_agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
+from tau_agent.loop import BeforeToolCall
 from tau_agent.messages import (
     AgentMessage,
     AssistantMessage,
@@ -870,6 +871,10 @@ class CodingSession:
         """Cancel the currently running agent turn, if any."""
         self._harness.cancel()
 
+    def set_before_tool_call(self, callback: BeforeToolCall | None) -> None:
+        """Set the host-owned authorization hook used before tool execution."""
+        self._harness.config.before_tool_call = callback
+
     def queue_update_event(self) -> QueueUpdateEvent:
         """Return the current queue state as a coding-session event."""
         return QueueUpdateEvent(
@@ -891,8 +896,8 @@ class CodingSession:
         message = self._harness.pop_latest_steering()
         return None if message is None else message_text(message)
 
-    def set_model(self, model: str) -> None:
-        """Switch the active model for future turns and make it the default."""
+    def set_model(self, model: str, *, persist_default: bool = True) -> None:
+        """Switch the active model, optionally updating Tau's saved default."""
         provider = self._active_provider_config()
         if provider is not None:
             validate_provider_model(provider, model)
@@ -901,15 +906,58 @@ class CodingSession:
         self._sync_thinking_level_to_active_model()
         self._refresh_runtime_provider()
         self._sync_image_support()
-        self._persist_default_model_choice()
+        if persist_default:
+            self._persist_default_model_choice()
         self._persist_active_model_metadata()
 
-    def set_model_choice(self, choice: ModelChoice) -> None:
+    def set_model_choice(self, choice: ModelChoice, *, persist_default: bool = True) -> None:
         """Switch provider/model as one operation."""
         if choice.provider_name == self.provider_name:
-            self.set_model(choice.model)
+            self.set_model(choice.model, persist_default=persist_default)
             return
-        self._set_provider_model(choice.provider_name, choice.model)
+        self._set_provider_model(
+            choice.provider_name,
+            choice.model,
+            persist_default=persist_default,
+        )
+
+    async def switch_model_choice(
+        self,
+        choice: ModelChoice,
+        *,
+        persist_default: bool = True,
+    ) -> None:
+        """Switch provider/model and persist the choice on the active session branch."""
+        if self._harness.is_running:
+            raise RuntimeError("Tau is still working; wait before switching models.")
+
+        previous_provider = self.provider_name
+        previous_model = self.model
+        previous_thinking_level = self._thinking_level
+        self.set_model_choice(choice, persist_default=persist_default)
+        if (
+            self.provider_name == previous_provider
+            and self.model == previous_model
+            and self._thinking_level == previous_thinking_level
+        ):
+            return
+
+        model_entry = ModelChangeEntry(
+            parent_id=self._last_parent_id,
+            model=self.model,
+        )
+        await self._append_session_entry(model_entry)
+        self._last_parent_id = model_entry.id
+        if self._thinking_level != previous_thinking_level:
+            thinking_entry = ThinkingLevelChangeEntry(
+                parent_id=self._last_parent_id,
+                thinking_level=self._thinking_level,
+            )
+            await self._append_session_entry(thinking_entry)
+            self._last_parent_id = thinking_entry.id
+        leaf = LeafEntry(parent_id=self._last_parent_id, entry_id=self._last_parent_id)
+        await self._append_session_entry(leaf)
+        await self._refresh_persisted_state(leaf_id=self._last_parent_id)
 
     def is_scoped_model(self, choice: ModelChoice) -> bool:
         """Return whether a provider/model pair is in the scoped model list."""
@@ -1022,8 +1070,13 @@ class CodingSession:
             temperature=self._temperature,
         )
 
-    async def set_thinking_level(self, level: str) -> str:
-        """Persist and activate a thinking mode for future turns."""
+    async def set_thinking_level(
+        self,
+        level: str,
+        *,
+        persist_default: bool = True,
+    ) -> str:
+        """Persist a session thinking mode, optionally updating the saved default."""
         normalized = normalize_thinking_level(level)
         available = self.available_thinking_levels
         if not available:
@@ -1054,7 +1107,8 @@ class CodingSession:
         await self._append_session_entry(leaf)
         self._last_parent_id = entry.id
 
-        self._persist_thinking_level_choice()
+        if persist_default:
+            self._persist_thinking_level_choice()
         await self._refresh_persisted_state(leaf_id=entry.id)
         return f"Thinking mode: {normalized}"
 

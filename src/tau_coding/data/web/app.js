@@ -8,6 +8,9 @@ const state = {
   activeRunId: null,
   liveMessage: null,
   sessionOptions: null,
+  configuration: null,
+  queue: { steering: [], followUp: [] },
+  pendingToolAuthorization: null,
 };
 const { createAndEnterSession, resolveTemperature } = globalThis.TauSessionActions;
 
@@ -21,8 +24,15 @@ const composer = document.querySelector("#composer");
 const promptInput = document.querySelector("#prompt-input");
 const sendButton = document.querySelector("#send-button");
 const cancelButton = document.querySelector("#cancel-button");
+const steerButton = document.querySelector("#steer-button");
+const followUpButton = document.querySelector("#follow-up-button");
+const queuePanel = document.querySelector("#queue-panel");
+const steeringQueue = document.querySelector("#steering-queue");
+const followUpQueue = document.querySelector("#follow-up-queue");
+const clearQueueButton = document.querySelector("#clear-queue-button");
 const composerState = document.querySelector("#composer-state");
 const sessionMenu = document.querySelector(".session-menu");
+const sessionSettingsButton = document.querySelector("#session-settings-button");
 const renameSessionButton = document.querySelector("#rename-session-button");
 const deleteSessionButton = document.querySelector("#delete-session-button");
 const exportHtmlLink = document.querySelector("#export-html-link");
@@ -45,6 +55,18 @@ const deleteSessionDialog = document.querySelector("#delete-session-dialog");
 const deleteSessionForm = document.querySelector("#delete-session-form");
 const deleteSessionConfirmation = document.querySelector("#delete-session-confirmation");
 const deleteSessionSubmit = document.querySelector("#delete-session-submit");
+const sessionSettingsDialog = document.querySelector("#session-settings-dialog");
+const sessionSettingsForm = document.querySelector("#session-settings-form");
+const sessionProvider = document.querySelector("#session-provider");
+const sessionModel = document.querySelector("#session-model");
+const sessionThinking = document.querySelector("#session-thinking");
+const sessionThinkingHelp = document.querySelector("#session-thinking-help");
+const sessionSettingsSubmit = document.querySelector("#session-settings-submit");
+const toolAuthorizationDialog = document.querySelector("#tool-authorization-dialog");
+const toolAuthorizationName = document.querySelector("#tool-authorization-name");
+const toolAuthorizationArguments = document.querySelector(
+  "#tool-authorization-arguments",
+);
 let toastTimer;
 
 function element(tag, className, text) {
@@ -146,6 +168,7 @@ function activeSession() {
 
 function setSessionActions() {
   const session = activeSession();
+  sessionSettingsButton.disabled = !session || state.running;
   renameSessionButton.disabled = !session;
   deleteSessionButton.disabled = !session;
   [
@@ -171,6 +194,7 @@ function renderNoSessionSelected() {
   document.querySelector("#active-session-state").textContent = "NONE";
   document.querySelector("#fact-provider").textContent = "—";
   document.querySelector("#fact-model").textContent = "—";
+  document.querySelector("#fact-thinking").textContent = "—";
   document.querySelector("#fact-temperature").textContent = "—";
   document.querySelector("#fact-messages").textContent = "—";
   document.querySelector("#fact-updated").textContent = "—";
@@ -181,6 +205,9 @@ function renderNoSessionSelected() {
     element("p", null, "使用左侧“新建会话”选择项目、Provider 和模型。"),
   );
   transcriptContent.append(empty);
+  state.configuration = null;
+  state.queue = { steering: [], followUp: [] };
+  renderQueue();
   setSessionActions();
 }
 
@@ -373,6 +400,17 @@ function renderMessage(message) {
   return article;
 }
 
+function appendCommandResult(command, message) {
+  transcriptContent.querySelector(".empty-transcript")?.remove();
+  const result = element("article", "summary-message command-message");
+  result.append(
+    element("strong", null, command),
+    element("pre", null, message || "Command completed."),
+  );
+  transcriptContent.append(result);
+  scrollTranscriptToBottom();
+}
+
 function renderTranscript(payload) {
   transcriptContent.replaceChildren();
   if (!payload.messages.length) {
@@ -387,10 +425,12 @@ function renderTranscript(payload) {
   payload.messages.forEach((message) => transcriptContent.append(renderMessage(message)));
 }
 
-function setSessionFacts(session, messageCount) {
+function setSessionFacts(session, messageCount, configuration = state.configuration) {
   document.querySelector("#active-session-state").textContent = "LOADED";
   document.querySelector("#fact-provider").textContent = session.providerName || "—";
   document.querySelector("#fact-model").textContent = session.model || "—";
+  document.querySelector("#fact-thinking").textContent =
+    configuration?.thinkingLevel || "off";
   document.querySelector("#fact-temperature").textContent =
     session.temperature === null || session.temperature === undefined
       ? "auto"
@@ -424,11 +464,16 @@ function markBranchLoaded(messageCount) {
 
 function setComposerState() {
   const hasSession = Boolean(state.activeSessionId);
-  const ready =
-    hasSession && state.eventStreamConnected && !state.running && !state.submitting;
+  const ready = hasSession && state.eventStreamConnected && !state.submitting;
   promptInput.disabled = !ready;
   sendButton.disabled = !ready || !promptInput.value.trim();
+  sendButton.hidden = state.running;
+  steerButton.hidden = !state.running;
+  followUpButton.hidden = !state.running;
+  steerButton.disabled = !ready || !promptInput.value.trim();
+  followUpButton.disabled = !ready || !promptInput.value.trim();
   cancelButton.hidden = !state.running;
+  sessionSettingsButton.disabled = !hasSession || state.running;
   if (!hasSession) {
     promptInput.placeholder = "选择一个会话后发送任务…";
     composerState.textContent = "未选择会话";
@@ -439,13 +484,34 @@ function setComposerState() {
     promptInput.placeholder = "正在提交任务…";
     composerState.textContent = "正在提交任务";
   } else if (state.running) {
-    promptInput.placeholder = "Tau 正在运行…";
-    composerState.textContent = "Tau 正在运行";
+    promptInput.placeholder = "输入转向消息，或选择“跟进”…";
+    composerState.textContent = "Tau 正在运行，可继续排队";
   } else {
     promptInput.placeholder = "发送任务给 Tau…";
     composerState.textContent = "会话已就绪";
   }
+  renderQueue();
   renderSessionList();
+}
+
+function renderQueue() {
+  const steering = state.queue.steering || [];
+  const followUp = state.queue.followUp || [];
+  const hasQueuedMessages = steering.length + followUp.length > 0;
+  queuePanel.hidden = !state.running && !hasQueuedMessages;
+  clearQueueButton.disabled = !hasQueuedMessages;
+  steeringQueue.replaceChildren(
+    ...steering.map((message) => element("li", null, message)),
+  );
+  followUpQueue.replaceChildren(
+    ...followUp.map((message) => element("li", null, message)),
+  );
+  if (!steering.length) {
+    steeringQueue.append(element("li", "queue-empty", "无"));
+  }
+  if (!followUp.length) {
+    followUpQueue.append(element("li", "queue-empty", "无"));
+  }
 }
 
 function addTraceEvent(type, detail = "") {
@@ -504,6 +570,33 @@ function finishLiveMessage(message) {
   state.liveMessage = null;
 }
 
+function updateConfiguration(configuration) {
+  state.configuration = configuration;
+  const session = activeSession();
+  if (session) {
+    session.providerName = configuration.providerName;
+    session.model = configuration.model;
+    setSessionFacts(
+      session,
+      document.querySelector("#fact-messages").textContent || "0",
+      configuration,
+    );
+    renderSessionList();
+  }
+}
+
+function showToolAuthorization(event) {
+  state.pendingToolAuthorization = event;
+  toolAuthorizationName.textContent = event.toolName;
+  toolAuthorizationArguments.textContent = JSON.stringify(event.arguments || {}, null, 2);
+  setFormError("#tool-authorization-error");
+  toolAuthorizationDialog
+    .querySelectorAll("[data-tool-decision]")
+    .forEach((button) => (button.disabled = false));
+  if (!toolAuthorizationDialog.open) toolAuthorizationDialog.showModal();
+  addTraceEvent("tool_authorization_requested", event.toolName);
+}
+
 async function handleLiveEvent(event, sessionId) {
   if (sessionId !== state.activeSessionId) return;
   if (event.type === "web_connected") {
@@ -525,7 +618,25 @@ async function handleLiveEvent(event, sessionId) {
     addTraceEvent("run_started", event.runId.slice(0, 8));
     return;
   }
-  if (event.type === "message_start") {
+  if (event.type === "queue_update") {
+    state.queue = {
+      steering: event.steering || [],
+      followUp: event.followUp || [],
+    };
+    renderQueue();
+    addTraceEvent(
+      "queue_update",
+      `${state.queue.steering.length} steering · ${state.queue.followUp.length} follow-up`,
+    );
+  } else if (event.type === "configuration_updated") {
+    updateConfiguration(event);
+    addTraceEvent("configuration_updated", `${event.providerName} · ${event.model}`);
+  } else if (event.type === "tool_authorization_requested") {
+    showToolAuthorization(event);
+  } else if (event.type === "command_result") {
+    appendCommandResult(event.command, event.message);
+    addTraceEvent("command_result", event.command);
+  } else if (event.type === "message_start") {
     beginLiveMessage(event.message);
   } else if (event.type === "message_update") {
     const assistantEvent = event.assistantMessageEvent;
@@ -550,6 +661,10 @@ async function handleLiveEvent(event, sessionId) {
     state.submitting = true;
     state.activeRunId = null;
     state.liveMessage = null;
+    if (state.pendingToolAuthorization) {
+      state.pendingToolAuthorization = null;
+      toolAuthorizationDialog.close();
+    }
     setComposerState();
     addTraceEvent("run_finished", event.status);
     try {
@@ -568,6 +683,7 @@ function connectEventStream(sessionId) {
   state.running = false;
   state.activeRunId = null;
   state.liveMessage = null;
+  state.queue = { steering: [], followUp: [] };
   setComposerState();
 
   const source = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
@@ -583,6 +699,10 @@ function connectEventStream(sessionId) {
   source.onerror = () => {
     if (state.eventSource !== source) return;
     state.eventStreamConnected = false;
+    if (state.pendingToolAuthorization) {
+      state.pendingToolAuthorization = null;
+      toolAuthorizationDialog.close();
+    }
     setComposerState();
     addTraceEvent("event_stream_reconnecting", "SSE connection lost");
   };
@@ -610,9 +730,10 @@ async function loadSession(sessionId, options = {}) {
     const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
     if (state.activeSessionId !== sessionId) return;
     renderTranscript(payload);
+    state.configuration = payload.configuration;
     const index = state.sessions.findIndex((item) => item.id === sessionId);
     if (index >= 0) state.sessions[index] = payload.session;
-    setSessionFacts(payload.session, payload.messages.length);
+    setSessionFacts(payload.session, payload.messages.length, payload.configuration);
     markBranchLoaded(payload.messages.length);
     renderSessionList();
     if (scrollToBottom) {
@@ -730,6 +851,53 @@ async function loadSessionOptions() {
   }
 }
 
+function selectedSessionProviderConfiguration() {
+  return state.configuration?.providers.find(
+    (provider) => provider.name === sessionProvider.value,
+  );
+}
+
+function populateSessionThinking(selectedLevel) {
+  const provider = selectedSessionProviderConfiguration();
+  const levels = provider?.thinkingLevels?.[sessionModel.value] || [];
+  sessionThinking.replaceChildren();
+  levels.forEach((level) => {
+    const option = element("option", null, level);
+    option.value = level;
+    sessionThinking.append(option);
+  });
+  sessionThinking.disabled = !levels.length;
+  if (levels.includes(selectedLevel)) sessionThinking.value = selectedLevel;
+  sessionThinkingHelp.textContent = levels.length
+    ? `可用强度：${levels.join("、")}`
+    : state.configuration?.thinkingUnavailableReason || "当前模型不支持 thinking。";
+}
+
+function populateSessionModels(selectedModel, selectedThinking) {
+  const provider = selectedSessionProviderConfiguration();
+  sessionModel.replaceChildren();
+  (provider?.models || []).forEach((model) => {
+    const option = element("option", null, model);
+    option.value = model;
+    sessionModel.append(option);
+  });
+  if (provider?.models.includes(selectedModel)) sessionModel.value = selectedModel;
+  populateSessionThinking(selectedThinking);
+}
+
+function populateSessionSettings() {
+  const configuration = state.configuration;
+  if (!configuration) return;
+  sessionProvider.replaceChildren();
+  configuration.providers.forEach((provider) => {
+    const option = element("option", null, provider.name);
+    option.value = provider.name;
+    sessionProvider.append(option);
+  });
+  sessionProvider.value = configuration.providerName;
+  populateSessionModels(configuration.model, configuration.thinkingLevel);
+}
+
 async function loadSessions() {
   reloadButton.classList.add("is-spinning");
   try {
@@ -784,6 +952,47 @@ document.querySelector("#new-session-button").addEventListener("click", async ()
 newSessionProvider.addEventListener("change", () => populateModelChoices());
 newSessionModel.addEventListener("change", syncTemperatureControls);
 newSessionTemperatureMode.addEventListener("change", syncTemperatureControls);
+
+sessionSettingsButton.addEventListener("click", () => {
+  if (!state.configuration || state.running) return;
+  sessionMenu.removeAttribute("open");
+  setFormError("#session-settings-error");
+  populateSessionSettings();
+  sessionSettingsDialog.showModal();
+});
+
+sessionProvider.addEventListener("change", () => {
+  populateSessionModels(null, null);
+});
+sessionModel.addEventListener("change", () => populateSessionThinking(null));
+
+sessionSettingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const session = activeSession();
+  if (!session || state.running || sessionSettingsSubmit.disabled) return;
+  sessionSettingsSubmit.disabled = true;
+  setFormError("#session-settings-error");
+  try {
+    const payload = await postJson(
+      `/api/sessions/${encodeURIComponent(session.id)}/configuration`,
+      {
+        providerName: sessionProvider.value,
+        model: sessionModel.value,
+        thinkingLevel: sessionThinking.disabled ? null : sessionThinking.value,
+      },
+    );
+    const index = state.sessions.findIndex((item) => item.id === session.id);
+    if (index >= 0) state.sessions[index] = payload.session;
+    updateConfiguration(payload.configuration);
+    sessionSettingsDialog.close();
+    showToast("会话模型设置已更新");
+  } catch (error) {
+    setFormError("#session-settings-error", error.message);
+  } finally {
+    sessionSettingsSubmit.disabled = false;
+    setSessionActions();
+  }
+});
 
 newSessionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -947,14 +1156,16 @@ deleteSessionForm.addEventListener("submit", async (event) => {
   });
 });
 
-[newSessionDialog, renameSessionDialog, deleteSessionDialog].forEach((dialog) => {
+[newSessionDialog, sessionSettingsDialog, renameSessionDialog, deleteSessionDialog].forEach(
+  (dialog) => {
   dialog.querySelectorAll(".dialog-close, .dialog-cancel").forEach((button) => {
     button.addEventListener("click", () => dialog.close());
   });
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });
-});
+  },
+);
 
 document.querySelector(".theme-toggle").addEventListener("click", () => {
   const next = shell.dataset.theme === "dark" ? "light" : "dark";
@@ -984,29 +1195,71 @@ promptInput.addEventListener("input", () => {
 promptInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    composer.requestSubmit();
+    if (state.running && event.altKey) {
+      submitComposerMessage("follow_up");
+    } else {
+      composer.requestSubmit();
+    }
   }
 });
 
-composer.addEventListener("submit", async (event) => {
-  event.preventDefault();
+async function submitComposerMessage(requestedBehavior = null) {
   const sessionId = state.activeSessionId;
   const message = promptInput.value.trim();
-  if (!sessionId || !message || state.running || state.submitting) return;
+  if (!sessionId || !message || state.submitting) return;
+  const behavior = state.running ? requestedBehavior || "steer" : null;
 
   state.submitting = true;
-  state.running = true;
   setComposerState();
   try {
-    await postJson(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, { message });
+    const payload = await postJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+      behavior ? { message, behavior } : { message },
+    );
     promptInput.value = "";
     promptInput.style.height = "auto";
+    if (payload.status === "queued") {
+      state.queue = payload.queue;
+      renderQueue();
+      showToast(behavior === "follow_up" ? "跟进消息已排队" : "转向消息已排队");
+    } else if (payload.status === "command") {
+      appendCommandResult(payload.command, payload.message);
+      addTraceEvent("command_result", payload.command);
+    } else if (payload.status === "accepted") {
+      state.running = true;
+    }
   } catch (error) {
-    state.running = false;
     showToast(`任务发送失败：${error.message}`);
   } finally {
     state.submitting = false;
     setComposerState();
+  }
+}
+
+composer.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await submitComposerMessage();
+});
+
+steerButton.addEventListener("click", () => submitComposerMessage("steer"));
+followUpButton.addEventListener("click", () => submitComposerMessage("follow_up"));
+
+clearQueueButton.addEventListener("click", async () => {
+  const sessionId = state.activeSessionId;
+  if (!sessionId || clearQueueButton.disabled) return;
+  clearQueueButton.disabled = true;
+  try {
+    const payload = await postJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/queue/clear`,
+      {},
+    );
+    state.queue = payload.queue;
+    renderQueue();
+    showToast("排队消息已清空");
+  } catch (error) {
+    showToast(`清空队列失败：${error.message}`);
+  } finally {
+    renderQueue();
   }
 });
 
@@ -1022,6 +1275,36 @@ cancelButton.addEventListener("click", async () => {
   } finally {
     cancelButton.disabled = false;
   }
+});
+
+toolAuthorizationDialog
+  .querySelectorAll("[data-tool-decision]")
+  .forEach((button) => {
+    button.addEventListener("click", async () => {
+      const pending = state.pendingToolAuthorization;
+      const sessionId = state.activeSessionId;
+      if (!pending || !sessionId) return;
+      toolAuthorizationDialog
+        .querySelectorAll("[data-tool-decision]")
+        .forEach((item) => (item.disabled = true));
+      setFormError("#tool-authorization-error");
+      try {
+        await postJson(
+          `/api/sessions/${encodeURIComponent(sessionId)}/tool-authorizations/${encodeURIComponent(pending.requestId)}`,
+          { decision: button.dataset.toolDecision },
+        );
+        state.pendingToolAuthorization = null;
+        toolAuthorizationDialog.close();
+      } catch (error) {
+        setFormError("#tool-authorization-error", error.message);
+        toolAuthorizationDialog
+          .querySelectorAll("[data-tool-decision]")
+          .forEach((item) => (item.disabled = false));
+      }
+    });
+  });
+toolAuthorizationDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
 });
 
 shell.dataset.theme = window.localStorage.getItem("tau-web-theme") || "dark";

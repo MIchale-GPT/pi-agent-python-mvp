@@ -62,33 +62,63 @@ The live workspace:
 - dark and light themes are available.
 
 Select a session, wait until the composer says **Session ready**, type a task,
-and press Enter. Use Shift+Enter for a newline.
+and press Enter. Use Shift+Enter for a newline. The same composer accepts
+Web-supported slash commands:
 
-One `tau-web` process allows only one run in a session. While Tau is running,
-the send control becomes a **Cancel** control. This is not a cross-process lock,
-so do not run the same session concurrently in the TUI or a second Tau process.
-Closing the tab does not cancel the run; it only disconnects that browser's
-event subscriber. Returning to the page reconnects the event stream and the
-durable transcript is refreshed when the run settles.
+- `/help` lists the commands currently exposed by Tau Web;
+- `/compact [instructions]` compacts the durable active context;
+- `/session`, `/system`, and `/hotkeys` return their read-only session output.
+
+One `tau-web` process allows only one active agent run in a session. While Tau
+is running, the composer remains editable:
+
+- press Enter or choose **Steer** to inject a steering message as soon as the
+  agent loop can accept it;
+- choose **Follow up** to run a message after the current task settles;
+- inspect both queues above the composer and choose **Clear queue** to discard
+  messages that have not run;
+- choose **Cancel** to request cancellation of the active run.
+
+This is not a cross-process lock, so do not run the same session concurrently
+in the TUI or a second Tau process. Closing the tab does not cancel ordinary
+agent work; it only disconnects that browser's event subscriber. Returning to
+the page reconnects the event stream and the durable transcript is refreshed
+when the run settles.
+
+## Authorize tool calls
+
+Tau Web pauses before every tool execution and displays the tool name and
+arguments. Choose **Allow once**, **Deny**, or **Cancel run**. The first browser
+response wins when more than one tab is connected.
+
+Tool execution defaults to denied when no browser event subscriber is
+connected, when the last subscriber disconnects during a pending request, or
+when the request times out. A reconnecting browser never grants a tool call
+implicitly.
 
 ## Manage a session
 
 Open the current-session menu in the top bar to:
 
+- change the current session's configured **Provider**, **model**, and
+  **Thinking level**;
 - **Rename** the indexed session;
 - **Export HTML** for a self-contained, human-readable view of the complete
   session tree;
 - **Export JSONL** for the complete durable entry sequence;
 - **Delete session**.
 
+Provider/model/thinking changes are available only while the session is idle.
+The choices come from the current Tau provider configuration and are appended
+to the session's durable branch; they do not replace the global default model.
+
 Delete is permanent: it removes the index entry and the session's JSONL file.
 The dialog requires typing `DELETE`, and Tau refuses deletion while that session
 has an active run. Cancel or wait for the run before deleting it.
 
 The selected temperature is stored with the session and shown in the session
-facts. Changing the Provider/model/thinking level or temperature on an existing
-session, built-in slash commands, and file browsing remain later Web
-capabilities.
+facts. Changing temperature on an existing session and file browsing remain
+later Web capabilities.
 
 ## How it is connected
 

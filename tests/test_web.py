@@ -4,7 +4,7 @@ import asyncio
 import json
 import shutil
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from http.client import HTTPConnection
 from pathlib import Path
 from threading import Event, Thread
@@ -14,12 +14,24 @@ from typing import Any
 import pytest
 
 import tau_coding.web as web_module
-from pi_event_helpers import assistant_done, assistant_error, assistant_start, text_delta
-from tau_agent.messages import AgentMessage, AssistantMessage, TextContent, UserMessage
+from pi_event_helpers import (
+    assistant_done,
+    assistant_error,
+    assistant_start,
+    text_delta,
+    tool_call_end,
+)
+from tau_agent.messages import (
+    AgentMessage,
+    AssistantMessage,
+    TextContent,
+    ToolCall,
+    UserMessage,
+)
 from tau_agent.provider import CancellationToken, ModelProvider
 from tau_agent.provider_events import AssistantMessageEvent
 from tau_agent.session import JsonlSessionStorage, LeafEntry, MessageEntry, entry_to_json_line
-from tau_agent.tools import AgentTool
+from tau_agent.tools import AgentTool, AgentToolResult
 from tau_coding import session as coding_session_module
 from tau_coding.paths import TauPaths
 from tau_coding.provider_config import (
@@ -53,6 +65,8 @@ async def _load_test_session(
     selected: CodingSessionRecord,
     selected_manager: SessionManager,
     provider: ModelProvider,
+    *,
+    tools: list[AgentTool] | None = None,
 ) -> WebSessionHandle:
     session = await CodingSession.load(
         CodingSessionConfig(
@@ -69,6 +83,7 @@ async def _load_test_session(
             session_id=selected.id,
             session_manager=selected_manager,
             provider_name="fake",
+            tools=tools,
             extensions_enabled=False,
         )
     )
@@ -196,6 +211,14 @@ def test_web_server_serves_live_a_theme_and_session_api(tmp_path: Path) -> None:
         assert 'id="rename-session-dialog"' in page_body
         assert 'id="delete-session-dialog"' in page_body
         assert 'data-confirmation="DELETE"' in page_body
+        assert 'id="session-settings-button"' in page_body
+        assert 'id="session-settings-dialog"' in page_body
+        assert 'id="session-thinking"' in page_body
+        assert 'id="steer-button"' in page_body
+        assert 'id="follow-up-button"' in page_body
+        assert 'id="queue-panel"' in page_body
+        assert 'id="clear-queue-button"' in page_body
+        assert 'id="tool-authorization-dialog"' in page_body
         assert "新建会话将在后续阶段接入" not in page_body
 
         connection.request("GET", "/app.js")
@@ -209,6 +232,11 @@ def test_web_server_serves_live_a_theme_and_session_api(tmp_path: Path) -> None:
         assert "/rename" in script_body
         assert 'commandJson(path, body, "DELETE")' in script_body
         assert "/export?format=" in script_body
+        assert "/configuration" in script_body
+        assert "/queue/clear" in script_body
+        assert "/tool-authorizations/" in script_body
+        assert "tool_authorization_requested" in script_body
+        assert "command_result" in script_body
 
         connection.request("GET", "/session-actions.js")
         controller = connection.getresponse()
@@ -297,7 +325,10 @@ def test_session_options_and_create_api_open_a_configured_project_session(
 
         status, detail = _get_json(connection, f"/api/sessions/{session['id']}")
         assert status == 200
-        assert detail == {"session": session, "messages": []}
+        assert detail["session"] == session
+        assert detail["messages"] == []
+        assert detail["configuration"]["providerName"] == "fake-provider"
+        assert detail["configuration"]["model"] == "fake-small"
     finally:
         connection.close()
         server.shutdown()
@@ -457,6 +488,176 @@ async def test_web_load_reconciles_stored_temperature_with_model_api(
     assert updated.temperature == expected_temperature
 
     await handle.aclose()
+
+
+def test_session_configuration_api_lists_available_choices_and_persists_switches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="alpha-small",
+        provider_name="alpha",
+        title="Configurable session",
+        session_id="session-1",
+    )
+    settings = ProviderSettings(
+        default_provider="alpha",
+        providers=(
+            OpenAICompatibleProviderConfig(
+                name="alpha",
+                models=("alpha-small", "alpha-large"),
+                default_model="alpha-small",
+                thinking_levels=("off", "low"),
+                thinking_default="low",
+            ),
+            OpenAICompatibleProviderConfig(
+                name="beta",
+                models=("beta-reasoner",),
+                default_model="beta-reasoner",
+                thinking_levels=("low", "high"),
+                thinking_default="high",
+            ),
+        ),
+    )
+
+    class SwitchableProvider:
+        async def aclose(self) -> None:
+            return None
+
+    def create_provider(provider: object, **kwargs: object) -> SwitchableProvider:
+        del provider, kwargs
+        return SwitchableProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=SwitchableProvider(),
+                model=selected.model,
+                system="You are Tau.",
+                storage=JsonlSessionStorage(selected.path),
+                cwd=selected.cwd,
+                resource_paths=TauResourcePaths(
+                    root=selected_manager.paths.home,
+                    agents_root=selected_manager.paths.agents_home,
+                    paths=selected_manager.paths,
+                ),
+                session_id=selected.id,
+                session_manager=selected_manager,
+                provider_name=selected.provider_name or "alpha",
+                provider_settings=settings,
+                runtime_provider_config=settings.get_provider(selected.provider_name or "alpha"),
+                extensions_enabled=False,
+            )
+        )
+        return WebSessionHandle(session=session)
+
+    monkeypatch.setattr(web_module, "load_provider_settings", lambda paths: settings)
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+    monkeypatch.setattr(
+        coding_session_module,
+        "save_provider_thinking_level",
+        lambda **kwargs: pytest.fail(
+            f"Web session switch changed the global thinking default: {kwargs}"
+        ),
+    )
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        status, detail = _get_json(connection, "/api/sessions/session-1")
+
+        assert status == 200
+        assert detail["configuration"] == {
+            "providerName": "alpha",
+            "model": "alpha-small",
+            "thinkingLevel": "low",
+            "availableThinkingLevels": ["off", "low"],
+            "thinkingUnavailableReason": None,
+            "providers": [
+                {
+                    "name": "alpha",
+                    "models": ["alpha-small", "alpha-large"],
+                    "thinkingLevels": {
+                        "alpha-small": ["off", "low"],
+                        "alpha-large": ["off", "low"],
+                    },
+                },
+                {
+                    "name": "beta",
+                    "models": ["beta-reasoner"],
+                    "thinkingLevels": {"beta-reasoner": ["low", "high"]},
+                },
+            ],
+        }
+
+        status, updated = _post_json(
+            connection,
+            "/api/sessions/session-1/configuration",
+            {
+                "providerName": "beta",
+                "model": "beta-reasoner",
+                "thinkingLevel": "high",
+            },
+        )
+
+        assert status == 200
+        assert updated["session"]["providerName"] == "beta"
+        assert updated["session"]["model"] == "beta-reasoner"
+        assert updated["configuration"]["thinkingLevel"] == "high"
+        stored = manager.get_session(record.id)
+        assert stored is not None
+        assert stored.provider_name == "beta"
+        assert stored.model == "beta-reasoner"
+        entry_types = [
+            json.loads(line)["type"]
+            for line in record.path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert "model_change" in entry_types
+        assert "thinking_level_change" in entry_types
+
+        status, updated = _post_json(
+            connection,
+            "/api/sessions/session-1/configuration",
+            {
+                "providerName": "beta",
+                "model": "beta-reasoner",
+                "thinkingLevel": "low",
+            },
+        )
+        assert status == 200
+        assert updated["configuration"]["thinkingLevel"] == "low"
+
+        status, rejected = _post_json(
+            connection,
+            "/api/sessions/session-1/configuration",
+            {
+                "providerName": "beta",
+                "model": "not-configured",
+                "thinkingLevel": "high",
+            },
+        )
+        assert status == 422
+        assert rejected["error"] == "provider_selection_invalid"
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_create_api_rejects_unknown_directories_and_provider_models(
@@ -885,6 +1086,134 @@ def test_message_api_streams_coding_session_events_and_persists_turn(tmp_path: P
         thread.join(timeout=2)
 
 
+def test_message_api_dispatches_help_without_calling_the_provider(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Command session",
+        session_id="session-1",
+    )
+
+    class ProviderMustNotRun:
+        def stream_response(self, **kwargs: object) -> AsyncIterator[AssistantMessageEvent]:
+            del kwargs
+            raise AssertionError("/help must not call the provider")
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, ProviderMustNotRun())
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        status, payload = _post_json(
+            connection,
+            "/api/sessions/session-1/messages",
+            {"message": "/help"},
+        )
+
+        assert status == 200
+        assert payload["status"] == "command"
+        assert payload["command"] == "/help"
+        assert "Available commands:" in payload["message"]
+        assert not record.path.exists()
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_message_api_runs_compaction_as_an_async_session_command(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Compact session",
+        session_id="session-1",
+    )
+    provider = _StreamingFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    events_connection = HTTPConnection(host, port, timeout=2)
+    command_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        events_connection.request("GET", "/api/sessions/session-1/events")
+        events_response = events_connection.getresponse()
+        assert events_response.status == 200
+
+        status, _payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Retain this context"},
+        )
+        assert status == 202
+        _read_sse_events(events_response, until="run_finished")
+
+        status, payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "/compact Focus on the Web implementation."},
+        )
+
+        assert status == 202
+        assert payload["status"] == "accepted"
+        events = _read_sse_events(events_response, until="run_finished")
+        result = next(event for event in events if event["type"] == "command_result")
+        assert result["command"] == "/compact"
+        assert result["message"] == "Compacted 2 context entries."
+        entries = [
+            json.loads(line) for line in record.path.read_text(encoding="utf-8").splitlines()
+        ]
+        compaction = next(entry for entry in entries if entry["type"] == "compaction")
+        assert compaction["summary"] == "A theme is live."
+        detail = session_detail_payload(manager, record.id)
+        assert detail is not None
+        assert all(
+            message["text"] != "/compact Focus on the Web implementation."
+            for message in detail["messages"]
+        )
+    finally:
+        events_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_cancel_api_stops_the_active_coding_session_run(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     cwd = tmp_path / "project"
@@ -941,6 +1270,303 @@ def test_cancel_api_stops_the_active_coding_session_run(tmp_path: Path) -> None:
         assert events[-1]["status"] == "cancelled"
     finally:
         events_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_running_session_accepts_steering_and_follow_up_and_can_clear_queue(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Queued session",
+        session_id="session-1",
+    )
+    provider = _CancellableFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    command_connection = HTTPConnection(host, port, timeout=2)
+    events_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        status, _payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Keep working"},
+        )
+        assert status == 202
+        assert provider.started.wait(timeout=1)
+
+        status, steering = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Use the smaller API", "behavior": "steer"},
+        )
+        assert status == 200
+        assert steering == {
+            "status": "queued",
+            "behavior": "steer",
+            "queue": {
+                "steering": ["Use the smaller API"],
+                "followUp": [],
+            },
+        }
+
+        status, follow_up = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Then update the docs", "behavior": "follow_up"},
+        )
+        assert status == 200
+        assert follow_up["queue"] == {
+            "steering": ["Use the smaller API"],
+            "followUp": ["Then update the docs"],
+        }
+
+        events_connection.request("GET", "/api/sessions/session-1/events")
+        events_response = events_connection.getresponse()
+        connected = _read_sse_events(events_response, until="queue_update")
+        assert connected[-1] == {
+            "type": "queue_update",
+            "steering": ["Use the smaller API"],
+            "followUp": ["Then update the docs"],
+        }
+
+        status, cleared = _post_json(
+            command_connection,
+            "/api/sessions/session-1/queue/clear",
+            {},
+        )
+        assert status == 200
+        assert cleared == {
+            "status": "cleared",
+            "queue": {"steering": [], "followUp": []},
+        }
+
+        status, invalid = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Ambiguous", "behavior": "later"},
+        )
+        assert status == 422
+        assert invalid["error"] == "streaming_behavior_invalid"
+    finally:
+        _post_json(
+            command_connection,
+            "/api/sessions/session-1/cancel",
+            {},
+        )
+        events_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_status", "should_execute"),
+    [
+        ("allow", "completed", True),
+        ("deny", "completed", False),
+        ("cancel", "cancelled", False),
+    ],
+)
+def test_tool_authorization_supports_allow_deny_and_cancel(
+    tmp_path: Path,
+    decision: str,
+    expected_status: str,
+    should_execute: bool,
+) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Tool session",
+        session_id="session-1",
+    )
+    provider = _ToolCallingFakeProvider()
+    executed = Event()
+
+    async def execute(
+        tool_call_id: str,
+        arguments: Mapping[str, object],
+        signal: CancellationToken | None = None,
+        on_update: object = None,
+    ) -> AgentToolResult:
+        del tool_call_id, arguments, signal, on_update
+        executed.set()
+        return AgentToolResult(content="tool completed")
+
+    tool = AgentTool(
+        name="write_file",
+        label="Write file",
+        description="Write a project file.",
+        parameters={"type": "object"},
+        execute_fn=execute,
+    )
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(
+            selected,
+            selected_manager,
+            provider,
+            tools=[tool],
+        )
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    events_connection = HTTPConnection(host, port, timeout=2)
+    command_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        events_connection.request("GET", "/api/sessions/session-1/events")
+        events_response = events_connection.getresponse()
+        assert events_response.status == 200
+        status, _payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Use the write tool"},
+        )
+        assert status == 202
+
+        events = _read_sse_events(
+            events_response,
+            until="tool_authorization_requested",
+        )
+        request = events[-1]
+        assert request["toolName"] == "write_file"
+        assert request["arguments"] == {"path": "notes.md"}
+        assert not executed.is_set()
+
+        status, resolved = _post_json(
+            command_connection,
+            (f"/api/sessions/session-1/tool-authorizations/{request['requestId']}"),
+            {"decision": decision},
+        )
+        assert status == 200
+        assert resolved["decision"] == decision
+
+        completed = _read_sse_events(events_response, until="run_finished")
+        assert completed[-1]["status"] == expected_status
+        assert executed.is_set() is should_execute
+    finally:
+        events_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_tool_authorization_defaults_to_deny_when_the_browser_disconnects(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Disconnected tool session",
+        session_id="session-1",
+    )
+    provider = _ToolCallingFakeProvider()
+    executed = Event()
+
+    async def execute(
+        tool_call_id: str,
+        arguments: Mapping[str, object],
+        signal: CancellationToken | None = None,
+        on_update: object = None,
+    ) -> AgentToolResult:
+        del tool_call_id, arguments, signal, on_update
+        executed.set()
+        return AgentToolResult(content="must not run")
+
+    tool = AgentTool(
+        name="write_file",
+        label="Write file",
+        description="Write a project file.",
+        parameters={"type": "object"},
+        execute_fn=execute,
+    )
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(
+            selected,
+            selected_manager,
+            provider,
+            tools=[tool],
+        )
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    command_connection = HTTPConnection(host, port, timeout=2)
+    subscriber_id, subscriber = server.web_runtime.subscribe("session-1")
+
+    try:
+        status, _payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Use the write tool without a browser"},
+        )
+
+        assert status == 202
+        while True:
+            item = subscriber.get(timeout=1)
+            assert item is not None
+            if item.payload["type"] == "tool_authorization_requested":
+                break
+        assert not executed.is_set()
+
+        server.web_runtime.unsubscribe("session-1", subscriber_id)
+        assert provider.finished.wait(timeout=1)
+        assert not executed.is_set()
+    finally:
         command_connection.close()
         server.shutdown()
         server.server_close()
@@ -1232,6 +1858,43 @@ class _StreamingFakeProvider:
             yield assistant_start(model="fake")
             yield text_delta("A theme is live.")
             yield assistant_done(message=AssistantMessage(content="A theme is live."))
+
+        return iterator()
+
+
+class _ToolCallingFakeProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.finished = Event()
+
+    def stream_response(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[AgentMessage],
+        tools: list[AgentTool],
+        signal: CancellationToken | None = None,
+    ) -> AsyncIterator[AssistantMessageEvent]:
+        del model, system, messages, tools, signal
+        self.calls += 1
+        call_number = self.calls
+
+        async def iterator() -> AsyncIterator[AssistantMessageEvent]:
+            if call_number == 1:
+                call = ToolCall(
+                    id="call-1",
+                    name="write_file",
+                    arguments={"path": "notes.md"},
+                )
+                assistant = AssistantMessage(content=[call], model="fake")
+                yield assistant_start(model="fake")
+                yield tool_call_end(call)
+                yield assistant_done(message=assistant, finish_reason="toolUse")
+                return
+            yield assistant_start(model="fake")
+            yield assistant_done(message=AssistantMessage(content="Finished.", model="fake"))
+            self.finished.set()
 
         return iterator()
 

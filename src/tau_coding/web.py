@@ -21,8 +21,8 @@ from typing import Any, Literal, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import uuid4
 
-from tau_agent.events import MessageEndEvent
-from tau_agent.messages import AssistantMessage, ToolResultMessage, message_text
+from tau_agent.events import MessageEndEvent, MessageStartEvent
+from tau_agent.messages import AssistantMessage, ToolCall, ToolResultMessage, message_text
 from tau_agent.session import (
     BranchSummaryEntry,
     CompactionEntry,
@@ -30,6 +30,7 @@ from tau_agent.session import (
     MessageEntry,
     SessionEntry,
     SessionTreeError,
+    ThinkingLevelChangeEntry,
     entries_from_json_lines,
     path_to_entry,
 )
@@ -39,16 +40,25 @@ from tau_coding.provider_config import (
     MAX_TEMPERATURE,
     MIN_TEMPERATURE,
     ProviderConfigError,
+    ProviderSettings,
     compatible_temperature,
     load_provider_settings,
     normalize_temperature,
     provider_supports_temperature,
+    provider_thinking_levels,
+    provider_thinking_unavailable_reason,
     resolve_provider_selection,
     resolve_startup_thinking_level,
 )
 from tau_coding.provider_runtime import ClosableModelProvider, create_model_provider
 from tau_coding.resources import TauResourcePaths
-from tau_coding.session import CodingSession, CodingSessionConfig, jsonl_session_storage
+from tau_coding.session import (
+    CodingSession,
+    CodingSessionConfig,
+    ModelChoice,
+    StreamingBehavior,
+    jsonl_session_storage,
+)
 from tau_coding.session_export import (
     SessionExportError,
     normalize_export_format,
@@ -66,6 +76,14 @@ _MAX_REQUEST_BYTES = 256 * 1024
 _RUNTIME_CALL_TIMEOUT_SECONDS = 15.0
 _SSE_HEARTBEAT_SECONDS = 15.0
 _SSE_QUEUE_ITEMS = 2_048
+_TOOL_AUTHORIZATION_TIMEOUT_SECONDS = 120.0
+_WEB_IMMEDIATE_COMMANDS = frozenset(
+    {
+        "hotkeys",
+        "session",
+        "system",
+    }
+)
 _ASSET_CONTENT_TYPES = {
     "index.html": "text/html; charset=utf-8",
     "styles.css": "text/css; charset=utf-8",
@@ -78,6 +96,7 @@ WebSessionLoader = Callable[
     Awaitable["WebSessionHandle"],
 ]
 RunStatus = Literal["completed", "failed", "cancelled"]
+ToolAuthorizationDecision = Literal["allow", "deny", "cancel"]
 
 
 @dataclass(slots=True)
@@ -112,14 +131,24 @@ class WebSessionExport:
 
 
 @dataclass(slots=True)
+class _PendingToolAuthorization:
+    request_id: str
+    call: ToolCall
+    decision: asyncio.Future[ToolAuthorizationDecision]
+
+
+@dataclass(slots=True)
 class _WebSessionSlot:
     handle: WebSessionHandle | None = None
     run_task: asyncio.Task[None] | None = None
     run_id: str | None = None
+    run_kind: Literal["prompt", "compact"] | None = None
     cancel_requested: bool = False
     subscribers: dict[int, queue.Queue[_StreamItem | None]] = field(default_factory=dict)
     next_subscriber_id: int = 1
     next_sequence: int = 1
+    last_queue_state: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+    pending_tool_authorizations: dict[str, _PendingToolAuthorization] = field(default_factory=dict)
 
 
 class WebSessionBusyError(RuntimeError):
@@ -170,13 +199,38 @@ class TauWebRuntime:
             return
         self._loop.call_soon_threadsafe(self._unsubscribe, session_id, subscriber_id)
 
-    def submit(self, session_id: str, message: str) -> str:
-        """Start one coding-session turn and return its run id."""
-        return self._call(self._submit(session_id, message))
+    def submit(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        streaming_behavior: StreamingBehavior | None = None,
+    ) -> dict[str, object]:
+        """Dispatch a Web command or start one coding-session turn."""
+        return self._call(
+            self._submit(
+                session_id,
+                message,
+                streaming_behavior=streaming_behavior,
+            )
+        )
 
     def cancel(self, session_id: str) -> bool:
         """Request cancellation of the active run, returning whether one existed."""
         return self._call(self._cancel(session_id))
+
+    def clear_queue(self, session_id: str) -> dict[str, object]:
+        """Clear steering and follow-up messages waiting in one session."""
+        return self._call(self._clear_queue(session_id))
+
+    def respond_tool_authorization(
+        self,
+        session_id: str,
+        request_id: str,
+        decision: ToolAuthorizationDecision,
+    ) -> bool:
+        """Resolve one pending browser tool-authorization request."""
+        return self._call(self._respond_tool_authorization(session_id, request_id, decision))
 
     def session_list(self) -> dict[str, object]:
         """Read the session index on the runtime thread."""
@@ -211,6 +265,24 @@ class TauWebRuntime:
     def rename_session(self, session_id: str, title: str) -> dict[str, object]:
         """Rename one indexed session."""
         return self._call(self._rename_session(session_id, title))
+
+    def update_session_configuration(
+        self,
+        session_id: str,
+        *,
+        provider_name: str,
+        model: str,
+        thinking_level: str | None,
+    ) -> dict[str, object]:
+        """Switch one idle session's provider, model, and thinking level."""
+        return self._call(
+            self._update_session_configuration(
+                session_id,
+                provider_name=provider_name,
+                model=model,
+                thinking_level=thinking_level,
+            )
+        )
 
     def delete_session(self, session_id: str) -> None:
         """Delete one idle session and close its owned resources."""
@@ -276,26 +348,70 @@ class TauWebRuntime:
                 },
             )
         )
+        if slot.handle is not None:
+            subscriber.put(
+                self._stream_item(
+                    slot,
+                    _queue_event_payload(slot.handle.session),
+                )
+            )
+        for pending in slot.pending_tool_authorizations.values():
+            if pending.decision.done():
+                continue
+            subscriber.put(
+                self._stream_item(
+                    slot,
+                    _tool_authorization_event_payload(pending),
+                )
+            )
         return subscriber_id, subscriber
 
     def _unsubscribe(self, session_id: str, subscriber_id: int) -> None:
         slot = self._slots.get(session_id)
         if slot is not None:
             slot.subscribers.pop(subscriber_id, None)
+            if not slot.subscribers:
+                self._resolve_pending_tool_authorizations(slot, "deny")
 
-    async def _submit(self, session_id: str, message: str) -> str:
+    async def _submit(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        streaming_behavior: StreamingBehavior | None,
+    ) -> dict[str, object]:
         record = self._require_session(session_id)
         slot = self._slots.setdefault(record.id, _WebSessionSlot())
+        handle = await self._ensure_handle(record, slot)
+        command_name = _slash_command_name(message)
+        if command_name == "help":
+            return {
+                "status": "command",
+                "command": message,
+                "message": _web_help_message(handle.session),
+            }
+        if command_name in _WEB_IMMEDIATE_COMMANDS:
+            command = handle.session.handle_command(message)
+            if command.handled:
+                return {
+                    "status": "command",
+                    "command": message,
+                    "message": command.message or "",
+                }
         if slot.run_task is not None and not slot.run_task.done():
-            raise WebSessionBusyError("Tau is already running in this session")
-        if slot.handle is None:
-            handle = await self._session_loader(record, self._manager)
-            try:
-                await handle.session.emit_pending_session_start()
-            except BaseException:
-                await handle.aclose()
-                raise
-            slot.handle = handle
+            if streaming_behavior is None or slot.run_kind != "prompt" or command_name == "compact":
+                raise WebSessionBusyError("Tau is already running in this session")
+            async for _event in handle.session.prompt(
+                message,
+                streaming_behavior=streaming_behavior,
+            ):
+                pass
+            self._publish_queue_update(slot)
+            return {
+                "status": "queued",
+                "behavior": streaming_behavior,
+                "queue": _queue_payload(handle.session),
+            }
 
         run_id = uuid4().hex
         slot.run_id = run_id
@@ -308,11 +424,46 @@ class TauWebRuntime:
                 "runId": run_id,
             },
         )
+        if command_name == "compact":
+            command = handle.session.handle_command(message)
+            if command.handled and command.compact_summary is not None:
+                slot.run_kind = "compact"
+                slot.run_task = asyncio.create_task(
+                    self._run_compaction(
+                        record.id,
+                        slot,
+                        run_id,
+                        command.compact_summary,
+                    ),
+                    name=f"tau-web-compact-{run_id}",
+                )
+                return {"status": "accepted", "runId": run_id}
+
+        slot.run_kind = "prompt"
         slot.run_task = asyncio.create_task(
             self._run_prompt(record.id, slot, run_id, message),
             name=f"tau-web-run-{run_id}",
         )
-        return run_id
+        return {"status": "accepted", "runId": run_id}
+
+    async def _ensure_handle(
+        self,
+        record: CodingSessionRecord,
+        slot: _WebSessionSlot,
+    ) -> WebSessionHandle:
+        if slot.handle is not None:
+            return slot.handle
+        handle = await self._session_loader(record, self._manager)
+        try:
+            await handle.session.emit_pending_session_start()
+        except BaseException:
+            await handle.aclose()
+            raise
+        handle.session.set_before_tool_call(
+            lambda call: self._authorize_tool_call(record.id, slot, call)
+        )
+        slot.handle = handle
+        return handle
 
     async def _run_prompt(
         self,
@@ -326,6 +477,8 @@ class TauWebRuntime:
         try:
             async for event in slot.handle.session.prompt(message):
                 self._publish(slot, _coding_event_payload(event))
+                if isinstance(event, MessageStartEvent):
+                    self._publish_queue_update(slot, only_if_changed=True)
                 if (
                     isinstance(event, MessageEndEvent)
                     and isinstance(event.message, AssistantMessage)
@@ -373,6 +526,57 @@ class TauWebRuntime:
             )
             slot.run_task = None
             slot.run_id = None
+            slot.run_kind = None
+            slot.cancel_requested = False
+            self._publish_queue_update(slot, only_if_changed=True)
+
+    async def _run_compaction(
+        self,
+        session_id: str,
+        slot: _WebSessionSlot,
+        run_id: str,
+        instructions: str,
+    ) -> None:
+        assert slot.handle is not None
+        status: RunStatus = "completed"
+        try:
+            message = await slot.handle.session.compact(instructions or None)
+            self._publish(
+                slot,
+                {
+                    "type": "command_result",
+                    "sessionId": session_id,
+                    "runId": run_id,
+                    "command": "/compact",
+                    "message": message,
+                },
+            )
+        except asyncio.CancelledError:
+            status = "cancelled"
+        except Exception as exc:
+            status = "failed"
+            self._publish(
+                slot,
+                {
+                    "type": "run_error",
+                    "sessionId": session_id,
+                    "runId": run_id,
+                    "message": str(exc) or type(exc).__name__,
+                },
+            )
+        finally:
+            self._publish(
+                slot,
+                {
+                    "type": "run_finished",
+                    "sessionId": session_id,
+                    "runId": run_id,
+                    "status": status,
+                },
+            )
+            slot.run_task = None
+            slot.run_id = None
+            slot.run_kind = None
             slot.cancel_requested = False
 
     async def _cancel(self, session_id: str) -> bool:
@@ -381,7 +585,10 @@ class TauWebRuntime:
         if slot is None or slot.handle is None or slot.run_task is None or slot.run_task.done():
             return False
         slot.cancel_requested = True
+        self._resolve_pending_tool_authorizations(slot, "cancel")
         slot.handle.session.cancel()
+        if slot.run_kind == "compact":
+            slot.run_task.cancel()
         self._publish(
             slot,
             {
@@ -392,11 +599,93 @@ class TauWebRuntime:
         )
         return True
 
+    async def _clear_queue(self, session_id: str) -> dict[str, object]:
+        record = self._require_session(session_id)
+        slot = self._slots.setdefault(session_id, _WebSessionSlot())
+        handle = await self._ensure_handle(record, slot)
+        handle.session.clear_queued_messages()
+        self._publish_queue_update(slot)
+        return {
+            "status": "cleared",
+            "queue": _queue_payload(handle.session),
+        }
+
+    async def _authorize_tool_call(
+        self,
+        session_id: str,
+        slot: _WebSessionSlot,
+        call: ToolCall,
+    ) -> tuple[bool, str | None]:
+        if not slot.subscribers:
+            return True, "Tool execution denied because no Tau Web client is connected"
+
+        request_id = uuid4().hex
+        pending = _PendingToolAuthorization(
+            request_id=request_id,
+            call=call,
+            decision=self._loop.create_future(),
+        )
+        slot.pending_tool_authorizations[request_id] = pending
+        self._publish(slot, _tool_authorization_event_payload(pending))
+        try:
+            decision = await asyncio.wait_for(
+                pending.decision,
+                timeout=_TOOL_AUTHORIZATION_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            return True, "Tool execution denied because authorization timed out"
+        finally:
+            slot.pending_tool_authorizations.pop(request_id, None)
+
+        if decision == "allow":
+            return False, None
+        if decision == "cancel":
+            slot.cancel_requested = True
+            if slot.handle is not None:
+                slot.handle.session.cancel()
+            return True, "Tool execution cancelled by the user"
+        return True, "Tool execution denied by the user"
+
+    async def _respond_tool_authorization(
+        self,
+        session_id: str,
+        request_id: str,
+        decision: ToolAuthorizationDecision,
+    ) -> bool:
+        self._require_session(session_id)
+        slot = self._slots.get(session_id)
+        if slot is None:
+            return False
+        pending = slot.pending_tool_authorizations.get(request_id)
+        if pending is None or pending.decision.done():
+            return False
+        pending.decision.set_result(decision)
+        return True
+
+    @staticmethod
+    def _resolve_pending_tool_authorizations(
+        slot: _WebSessionSlot,
+        decision: ToolAuthorizationDecision,
+    ) -> None:
+        for pending in slot.pending_tool_authorizations.values():
+            if not pending.decision.done():
+                pending.decision.set_result(decision)
+
     async def _session_list(self) -> dict[str, object]:
         return session_list_payload(self._manager)
 
     async def _session_detail(self, session_id: str) -> dict[str, object] | None:
-        return session_detail_payload(self._manager, session_id)
+        payload = session_detail_payload(self._manager, session_id)
+        if payload is None:
+            return None
+        record = self._require_session(session_id)
+        slot = self._slots.get(session_id)
+        payload["configuration"] = (
+            _runtime_configuration_payload(slot.handle.session, self._manager)
+            if slot is not None and slot.handle is not None
+            else _stored_configuration_payload(record, self._manager)
+        )
+        return payload
 
     async def _session_options(self) -> dict[str, object]:
         return session_options_payload(self._manager)
@@ -462,6 +751,71 @@ class TauWebRuntime:
             raise KeyError(session_id)
         return {"session": _session_metadata(updated)}
 
+    async def _update_session_configuration(
+        self,
+        session_id: str,
+        *,
+        provider_name: str,
+        model: str,
+        thinking_level: str | None,
+    ) -> dict[str, object]:
+        record = self._require_session(session_id)
+        slot = self._slots.setdefault(session_id, _WebSessionSlot())
+        if slot.run_task is not None and not slot.run_task.done():
+            raise WebSessionBusyError("A running session cannot change configuration")
+
+        settings = load_provider_settings(self._manager.paths)
+        try:
+            selection = resolve_provider_selection(
+                settings,
+                provider_name=provider_name,
+                model=model,
+            )
+        except ProviderConfigError as exc:
+            raise WebSessionValidationError("provider_selection_invalid", str(exc)) from exc
+        available_thinking_levels = provider_thinking_levels(
+            selection.provider,
+            model=selection.model,
+        )
+        if thinking_level is not None and thinking_level not in available_thinking_levels:
+            available = ", ".join(available_thinking_levels) or "none"
+            raise WebSessionValidationError(
+                "thinking_level_invalid",
+                f"Thinking level is not available for {provider_name}:{model}. "
+                f"Available levels: {available}",
+            )
+
+        handle = await self._ensure_handle(record, slot)
+        try:
+            await handle.session.switch_model_choice(
+                ModelChoice(provider_name=provider_name, model=model),
+                persist_default=False,
+            )
+            if thinking_level is not None and thinking_level != handle.session.thinking_level:
+                await handle.session.set_thinking_level(
+                    thinking_level,
+                    persist_default=False,
+                )
+        except (ProviderConfigError, RuntimeError, ValueError) as exc:
+            raise WebSessionValidationError("session_configuration_invalid", str(exc)) from exc
+
+        updated = self._manager.get_session(session_id)
+        if updated is None:
+            raise KeyError(session_id)
+        configuration = _runtime_configuration_payload(handle.session, self._manager)
+        payload: dict[str, object] = {
+            "session": _session_metadata(updated),
+            "configuration": configuration,
+        }
+        self._publish(
+            slot,
+            {
+                "type": "configuration_updated",
+                **configuration,
+            },
+        )
+        return payload
+
     async def _delete_session(self, session_id: str) -> None:
         self._require_session(session_id)
         slot = self._slots.get(session_id)
@@ -521,6 +875,23 @@ class TauWebRuntime:
                     item,
                 )
 
+    def _publish_queue_update(
+        self,
+        slot: _WebSessionSlot,
+        *,
+        only_if_changed: bool = False,
+    ) -> None:
+        if slot.handle is None:
+            return
+        state = (
+            slot.handle.session.queued_steering_messages,
+            slot.handle.session.queued_follow_up_messages,
+        )
+        if only_if_changed and state == slot.last_queue_state:
+            return
+        slot.last_queue_state = state
+        self._publish(slot, _queue_event_payload(slot.handle.session))
+
     def _stream_item(self, slot: _WebSessionSlot, payload: dict[str, object]) -> _StreamItem:
         item = _StreamItem(sequence=slot.next_sequence, payload=payload)
         slot.next_sequence += 1
@@ -529,6 +900,7 @@ class TauWebRuntime:
     async def _shutdown(self) -> None:
         active_tasks: list[asyncio.Task[None]] = []
         for slot in self._slots.values():
+            self._resolve_pending_tool_authorizations(slot, "cancel")
             if slot.handle is not None and slot.run_task is not None and not slot.run_task.done():
                 slot.cancel_requested = True
                 slot.handle.session.cancel()
@@ -610,6 +982,88 @@ def session_options_payload(manager: SessionManager) -> dict[str, object]:
             }
             for provider in settings.providers
         ],
+    }
+
+
+def _configuration_providers_payload(settings: ProviderSettings) -> list[dict[str, object]]:
+    return [
+        {
+            "name": provider.name,
+            "models": list(provider.models),
+            "thinkingLevels": {
+                model: list(provider_thinking_levels(provider, model=model))
+                for model in provider.models
+            },
+        }
+        for provider in settings.providers
+    ]
+
+
+def _runtime_configuration_payload(
+    session: CodingSession,
+    manager: SessionManager,
+) -> dict[str, object]:
+    settings = load_provider_settings(manager.paths)
+    return {
+        "providerName": session.provider_name,
+        "model": session.model,
+        "thinkingLevel": session.thinking_level,
+        "availableThinkingLevels": list(session.available_thinking_levels),
+        "thinkingUnavailableReason": session.thinking_unavailable_reason,
+        "providers": _configuration_providers_payload(settings),
+    }
+
+
+def _stored_configuration_payload(
+    record: CodingSessionRecord,
+    manager: SessionManager,
+) -> dict[str, object]:
+    settings = load_provider_settings(manager.paths)
+    provider_name = record.provider_name or settings.default_provider
+    try:
+        selection = resolve_provider_selection(
+            settings,
+            provider_name=provider_name,
+            model=record.model,
+        )
+    except ProviderConfigError:
+        return {
+            "providerName": provider_name,
+            "model": record.model,
+            "thinkingLevel": None,
+            "availableThinkingLevels": [],
+            "thinkingUnavailableReason": "Session provider/model is not currently configured",
+            "providers": _configuration_providers_payload(settings),
+        }
+
+    active_entries = _active_session_entries(_read_session_entries(record.path))
+    thinking_level = next(
+        (
+            entry.thinking_level or "off"
+            for entry in reversed(active_entries)
+            if isinstance(entry, ThinkingLevelChangeEntry)
+        ),
+        resolve_startup_thinking_level(selection.provider, selection.model),
+    )
+    available_thinking_levels = provider_thinking_levels(
+        selection.provider,
+        model=selection.model,
+    )
+    unavailable_reason = (
+        None
+        if available_thinking_levels
+        else provider_thinking_unavailable_reason(
+            selection.provider,
+            model=selection.model,
+        )
+    )
+    return {
+        "providerName": selection.provider.name,
+        "model": selection.model,
+        "thinkingLevel": thinking_level,
+        "availableThinkingLevels": list(available_thinking_levels),
+        "thinkingUnavailableReason": unavailable_reason,
+        "providers": _configuration_providers_payload(settings),
     }
 
 
@@ -726,9 +1180,24 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
             session_id = session_path.removesuffix("/messages").rstrip("/")
             self._submit_message(session_id)
             return
+        if "/tool-authorizations/" in session_path:
+            session_id, _separator, request_id = session_path.partition("/tool-authorizations/")
+            self._respond_tool_authorization(
+                session_id.rstrip("/"),
+                request_id.strip("/"),
+            )
+            return
         if session_path.endswith("/cancel"):
             session_id = session_path.removesuffix("/cancel").rstrip("/")
             self._cancel_session(session_id)
+            return
+        if session_path.endswith("/queue/clear"):
+            session_id = session_path.removesuffix("/queue/clear").rstrip("/")
+            self._clear_session_queue(session_id)
+            return
+        if session_path.endswith("/configuration"):
+            session_id = session_path.removesuffix("/configuration").rstrip("/")
+            self._update_session_configuration(session_id)
             return
         if session_path.endswith("/rename"):
             session_id = session_path.removesuffix("/rename").rstrip("/")
@@ -858,6 +1327,68 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(payload)
 
+    def _update_session_configuration(self, session_id: str) -> None:
+        if not self._valid_session_id(session_id):
+            self._send_json({"error": "session_not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        body = self._read_command_json()
+        if body is None:
+            return
+        provider_name = body.get("providerName")
+        model = body.get("model")
+        thinking_level = body.get("thinkingLevel")
+        if not isinstance(provider_name, str) or not provider_name.strip():
+            self._send_json(
+                {"error": "provider_name_required"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        if not isinstance(model, str) or not model.strip():
+            self._send_json(
+                {"error": "model_required"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        if thinking_level is not None and (
+            not isinstance(thinking_level, str) or not thinking_level.strip()
+        ):
+            self._send_json(
+                {"error": "thinking_level_invalid"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        try:
+            payload = self._tau_server.web_runtime.update_session_configuration(
+                session_id,
+                provider_name=provider_name.strip(),
+                model=model.strip(),
+                thinking_level=(
+                    thinking_level.strip() if isinstance(thinking_level, str) else None
+                ),
+            )
+        except KeyError:
+            self._send_json({"error": "session_not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        except WebSessionBusyError as exc:
+            self._send_json(
+                {"error": "session_busy", "message": str(exc)},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        except WebSessionValidationError as exc:
+            self._send_json(
+                {"error": exc.code, "message": str(exc)},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        except (FutureTimeoutError, OSError, RuntimeError, ValueError) as exc:
+            self._send_json(
+                {"error": "session_configuration_failed", "message": str(exc)},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self._send_json(payload)
+
     @property
     def _tau_server(self) -> TauWebServer:
         return cast(TauWebServer, self.server)
@@ -956,14 +1487,28 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         message = body.get("message")
+        streaming_behavior = body.get("behavior")
         if not isinstance(message, str) or not message.strip():
             self._send_json(
                 {"error": "message_required"},
                 status=HTTPStatus.UNPROCESSABLE_ENTITY,
             )
             return
+        if streaming_behavior is not None and streaming_behavior not in {
+            "steer",
+            "follow_up",
+        }:
+            self._send_json(
+                {"error": "streaming_behavior_invalid"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
         try:
-            run_id = self._tau_server.web_runtime.submit(session_id, message.strip())
+            payload = self._tau_server.web_runtime.submit(
+                session_id,
+                message.strip(),
+                streaming_behavior=cast(StreamingBehavior | None, streaming_behavior),
+            )
         except KeyError:
             self._send_json({"error": "session_not_found"}, status=HTTPStatus.NOT_FOUND)
             return
@@ -976,9 +1521,66 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
             )
             return
+        status = (
+            HTTPStatus.OK if payload.get("status") in {"command", "queued"} else HTTPStatus.ACCEPTED
+        )
+        self._send_json(payload, status=status)
+
+    def _clear_session_queue(self, session_id: str) -> None:
+        if not self._valid_session_id(session_id):
+            self._send_json({"error": "session_not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        body = self._read_command_json(allow_empty=True)
+        if body is None:
+            return
+        try:
+            payload = self._tau_server.web_runtime.clear_queue(session_id)
+        except KeyError:
+            self._send_json({"error": "session_not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        except (FutureTimeoutError, RuntimeError):
+            self._send_json({"error": "runtime_unavailable"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        self._send_json(payload)
+
+    def _respond_tool_authorization(self, session_id: str, request_id: str) -> None:
+        if not self._valid_session_id(session_id) or not request_id or "/" in request_id:
+            self._send_json({"error": "tool_authorization_not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        body = self._read_command_json()
+        if body is None:
+            return
+        decision = body.get("decision")
+        if decision not in {"allow", "deny", "cancel"}:
+            self._send_json(
+                {"error": "tool_authorization_decision_invalid"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        try:
+            resolved = self._tau_server.web_runtime.respond_tool_authorization(
+                session_id,
+                request_id,
+                cast(ToolAuthorizationDecision, decision),
+            )
+        except KeyError:
+            self._send_json({"error": "session_not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        except (FutureTimeoutError, RuntimeError):
+            self._send_json({"error": "runtime_unavailable"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        if not resolved:
+            self._send_json(
+                {"error": "tool_authorization_not_pending"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         self._send_json(
-            {"status": "accepted", "runId": run_id},
-            status=HTTPStatus.ACCEPTED,
+            {
+                "status": "resolved",
+                "requestId": request_id,
+                "decision": decision,
+            }
         )
 
     def _cancel_session(self, session_id: str) -> None:
@@ -1301,6 +1903,51 @@ def _content_security_policy() -> str:
         "script-src 'self'; "
         "style-src 'self'"
     )
+
+
+def _slash_command_name(text: str) -> str | None:
+    stripped = text.strip()
+    if not stripped.startswith("/") or stripped.startswith("/skill:"):
+        return None
+    command = stripped[1:].partition(" ")[0].strip().lower()
+    return command or None
+
+
+def _web_help_message(session: CodingSession) -> str:
+    supported = {"compact", *_WEB_IMMEDIATE_COMMANDS}
+    lines = ["Available commands:", "/help\tShow commands available in Tau Web."]
+    lines.extend(
+        f"{command.usage}\t{command.description}"
+        for command in session.command_registry.list_commands()
+        if command.name in supported
+    )
+    return "\n".join(lines)
+
+
+def _queue_payload(session: CodingSession) -> dict[str, object]:
+    return {
+        "steering": list(session.queued_steering_messages),
+        "followUp": list(session.queued_follow_up_messages),
+    }
+
+
+def _queue_event_payload(session: CodingSession) -> dict[str, object]:
+    return {
+        "type": "queue_update",
+        **_queue_payload(session),
+    }
+
+
+def _tool_authorization_event_payload(
+    pending: _PendingToolAuthorization,
+) -> dict[str, object]:
+    return {
+        "type": "tool_authorization_requested",
+        "requestId": pending.request_id,
+        "toolCallId": pending.call.id,
+        "toolName": pending.call.name,
+        "arguments": pending.call.arguments,
+    }
 
 
 if __name__ == "__main__":
