@@ -81,6 +81,7 @@ from tau_coding.provider_config import (
     ProviderConfig,
     ProviderConfigError,
     ProviderSettings,
+    compatible_temperature,
     load_provider_settings,
     provider_default_thinking_level,
     provider_has_usable_credentials,
@@ -217,6 +218,7 @@ class CodingSessionConfig:
     auto_compact_token_threshold: int | None = None
     auto_compact_enabled: bool = True
     thinking_level: ThinkingLevel = DEFAULT_THINKING_LEVEL
+    temperature: float | None = None
     index_on_first_persist: bool = False
     shell_command_prefix: str | None = None
     skills_enabled: bool = True
@@ -281,6 +283,7 @@ class CodingSession:
         self._resource_paths = resource_paths_with_cwd(config.resource_paths, config.cwd)
         self._auto_compact_token_threshold = config.auto_compact_token_threshold
         self._auto_compact_enabled = config.auto_compact_enabled
+        self._temperature = config.temperature
         self._thinking_level = _state_thinking_level(
             state,
             default=_default_thinking_level_for_active_model(self),
@@ -427,6 +430,11 @@ class CodingSession:
     def provider_name(self) -> str:
         """Return the active provider name."""
         return self._provider_name
+
+    @property
+    def temperature(self) -> float | None:
+        """Return the requested sampling temperature, or the provider default."""
+        return self._temperature
 
     @property
     def available_providers(self) -> tuple[str, ...]:
@@ -888,17 +896,13 @@ class CodingSession:
         provider = self._active_provider_config()
         if provider is not None:
             validate_provider_model(provider, model)
+            self._temperature = self._temperature_for_provider_model(provider, model)
         self._harness.config.model = model
         self._sync_thinking_level_to_active_model()
         self._refresh_runtime_provider()
         self._sync_image_support()
         self._persist_default_model_choice()
-        if self._config.session_id is not None and self._config.session_manager is not None:
-            self._config.session_manager.touch_session(
-                self._config.session_id,
-                model=model,
-                provider_name=self.provider_name,
-            )
+        self._persist_active_model_metadata()
 
     def set_model_choice(self, choice: ModelChoice) -> None:
         """Switch provider/model as one operation."""
@@ -975,12 +979,14 @@ class CodingSession:
             model=model,
             current=self._thinking_level,
         )
+        temperature = self._temperature_for_provider_model(provider_config, model)
         try:
-            provider = create_model_provider(
+            provider = _create_session_provider(
                 provider_config,
                 credential_store=self._credential_store,
                 model=model,
                 thinking_level=thinking_level,
+                temperature=temperature,
             )
         except RuntimeError as exc:
             raise ProviderConfigError(str(exc)) from exc
@@ -991,15 +997,30 @@ class CodingSession:
         self._invalidate_runtime_model_limits()
         self._harness.config.model = model
         self._thinking_level = thinking_level
+        self._temperature = temperature
         self._sync_image_support()
         if persist_default:
             self._persist_default_model_choice()
-        if self._config.session_id is not None and self._config.session_manager is not None:
-            self._config.session_manager.touch_session(
-                self._config.session_id,
-                model=model,
-                provider_name=self.provider_name,
-            )
+        self._persist_active_model_metadata()
+
+    def _temperature_for_provider_model(
+        self,
+        provider: ProviderConfig,
+        model: str,
+    ) -> float | None:
+        """Keep an explicit temperature only when the destination supports it."""
+        return compatible_temperature(provider, model, self._temperature)
+
+    def _persist_active_model_metadata(self) -> None:
+        """Persist the model selection and its effective session temperature."""
+        if self._config.session_id is None or self._config.session_manager is None:
+            return
+        self._config.session_manager.touch_session(
+            self._config.session_id,
+            model=self.model,
+            provider_name=self.provider_name,
+            temperature=self._temperature,
+        )
 
     async def set_thinking_level(self, level: str) -> str:
         """Persist and activate a thinking mode for future turns."""
@@ -1108,11 +1129,12 @@ class CodingSession:
         provider_config = self._active_provider_config() or self._runtime_provider_config
         validate_provider_model(provider_config, self.model)
         try:
-            provider = create_model_provider(
+            provider = _create_session_provider(
                 provider_config,
                 credential_store=self._credential_store,
                 model=self.model,
                 thinking_level=self._thinking_level,
+                temperature=self._temperature,
             )
         except RuntimeError as exc:
             raise ProviderConfigError(str(exc)) from exc
@@ -1260,15 +1282,22 @@ class CodingSession:
             return
         previous_settings = self._provider_settings
         previous_thinking_level = self._thinking_level
+        previous_temperature = self._temperature
         self._provider_settings = load_provider_settings(self._resource_paths.paths)
         try:
             self._sync_thinking_level_to_active_model()
+            provider = self._active_provider_config()
+            if provider is not None:
+                self._temperature = self._temperature_for_provider_model(provider, self.model)
             self._refresh_runtime_provider()
             self._sync_image_support()
         except ProviderConfigError:
             self._provider_settings = previous_settings
             self._thinking_level = previous_thinking_level
+            self._temperature = previous_temperature
             raise
+        if self._temperature != previous_temperature:
+            self._persist_active_model_metadata()
 
     async def resume(self, session_id: str) -> str:
         """Replace this session's active state with another indexed session."""
@@ -1300,6 +1329,9 @@ class CodingSession:
             restore_record_model = True
             validate_provider_model(runtime_provider_config, model)
 
+        temperature = record.temperature
+        if runtime_provider_config is not None:
+            temperature = compatible_temperature(runtime_provider_config, model, temperature)
         replacement = await type(self).load(
             CodingSessionConfig(
                 provider=self._harness.config.provider,
@@ -1320,6 +1352,7 @@ class CodingSession:
                 auto_compact_token_threshold=self._auto_compact_token_threshold,
                 auto_compact_enabled=self._auto_compact_enabled,
                 thinking_level=self._thinking_level,
+                temperature=temperature,
                 shell_command_prefix=self._config.shell_command_prefix,
                 skills_enabled=self._config.skills_enabled,
                 extension_paths=self._config.extension_paths,
@@ -1337,6 +1370,8 @@ class CodingSession:
             replacement._sync_thinking_level_to_active_model()
             replacement._refresh_runtime_provider()
             replacement._sync_image_support()
+        if temperature != record.temperature:
+            manager.touch_session(record.id, temperature=temperature)
         await self._adopt_replacement(replacement, reason="resume")
         return f"Resumed session: {record.id}"
 
@@ -1350,11 +1385,13 @@ class CodingSession:
         model = self.model
         runtime_provider_config = self._runtime_provider_config
         thinking_level = self._thinking_level
+        temperature = self._temperature
         if self._provider_settings is not None:
             selection = resolve_provider_selection(self._provider_settings)
             provider_name = selection.provider.name
             model = selection.model
             runtime_provider_config = selection.provider
+            temperature = self._temperature_for_provider_model(selection.provider, model)
             thinking_level = _coerced_thinking_level(
                 selection.provider,
                 model=model,
@@ -1365,6 +1402,7 @@ class CodingSession:
             cwd=self.cwd,
             model=model,
             provider_name=provider_name,
+            temperature=temperature,
         )
         replacement = await type(self).load(
             replace(
@@ -1378,6 +1416,7 @@ class CodingSession:
                 provider_settings=self._provider_settings,
                 runtime_provider_config=runtime_provider_config,
                 thinking_level=thinking_level,
+                temperature=temperature,
                 index_on_first_persist=True,
                 extension_runtime=self._extension_runtime,
             )
@@ -1421,6 +1460,7 @@ class CodingSession:
         self._auto_compact_token_threshold = replacement._auto_compact_token_threshold
         self._auto_compact_enabled = replacement._auto_compact_enabled
         self._thinking_level = replacement._thinking_level
+        self._temperature = replacement._temperature
         self._pending_initial_entries = replacement._pending_initial_entries
         self._extension_runtime = replacement._extension_runtime
         self._image_support = replacement._image_support
@@ -1468,6 +1508,7 @@ class CodingSession:
                 model=self.model,
                 provider_name=self.provider_name,
                 session_id=self._config.session_id,
+                temperature=self._temperature,
             )
         self._config = replace(self._config, index_on_first_persist=False)
         self._ensure_session_file_initialized()
@@ -1858,6 +1899,7 @@ class CodingSession:
             model=self.model,
             provider_name=self.provider_name,
             session_id=self._config.session_id,
+            temperature=self._temperature,
         )
 
     async def _try_auto_compact(
@@ -2396,6 +2438,31 @@ def _initial_model_for_config(config: CodingSessionConfig) -> str:
     except ProviderConfigError:
         return provider.default_model
     return config.model
+
+
+def _create_session_provider(
+    provider: ProviderConfig,
+    *,
+    credential_store: FileCredentialStore,
+    model: str,
+    thinking_level: ThinkingLevel,
+    temperature: float | None,
+) -> ClosableModelProvider:
+    """Create a provider while preserving compatibility with automatic sampling."""
+    if temperature is None:
+        return create_model_provider(
+            provider,
+            credential_store=credential_store,
+            model=model,
+            thinking_level=thinking_level,
+        )
+    return create_model_provider(
+        provider,
+        credential_store=credential_store,
+        model=model,
+        thinking_level=thinking_level,
+        temperature=temperature,
+    )
 
 
 def _runtime_model_for_state(config: CodingSessionConfig, state: SessionState) -> str:

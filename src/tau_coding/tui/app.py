@@ -105,6 +105,7 @@ from tau_coding.provider_config import (
     OpenAICompatibleProviderConfig,
     ProviderConfig,
     ProviderSelection,
+    compatible_temperature,
     load_provider_settings,
     provider_config_from_catalog_entry,
     provider_has_usable_credentials,
@@ -6490,7 +6491,18 @@ def _create_startup_session_record(
     *,
     cwd: Path,
     selection: ProviderSelection,
+    temperature: float | None = None,
 ) -> CodingSessionRecord:
+    if temperature is not None:
+        try:
+            return manager.prepare_session(
+                cwd=cwd,
+                model=selection.model,
+                provider_name=selection.provider.name,
+                temperature=temperature,
+            )
+        except TypeError:
+            pass
     try:
         return manager.prepare_session(
             cwd=cwd,
@@ -6604,6 +6616,7 @@ async def run_tui_app(
     extension_paths: tuple[Path, ...] = (),
     extensions_enabled: bool = True,
     project_extensions_enabled: bool = False,
+    temperature: float | None = None,
 ) -> str | None:
     """Run the Textual app and return the active id when its session is persisted."""
     if new_session and session_id is not None:
@@ -6623,18 +6636,33 @@ async def run_tui_app(
         model=model,
         explicit_resume=session_id is not None,
     )
+    stored_temperature = record.temperature if record is not None else None
+    session_temperature = (
+        compatible_temperature(selection.provider, selection.model, stored_temperature)
+        if record is not None and temperature is None
+        else temperature
+    )
     startup_message: str | None = None
     startup_error_notice: str | None = None
     runtime_provider_config: ProviderConfig | None = selection.provider
     try:
-        provider = create_model_provider(
+        thinking_level = resolve_startup_thinking_level(
             selection.provider,
-            model=selection.model,
-            thinking_level=resolve_startup_thinking_level(
-                selection.provider,
-                selection.model,
-            ),
+            selection.model,
         )
+        if session_temperature is None:
+            provider = create_model_provider(
+                selection.provider,
+                model=selection.model,
+                thinking_level=thinking_level,
+            )
+        else:
+            provider = create_model_provider(
+                selection.provider,
+                model=selection.model,
+                thinking_level=thinking_level,
+                temperature=session_temperature,
+            )
     except RuntimeError as exc:
         # Most startup RuntimeErrors are missing credentials, but surface the real
         # cause so a non-auth failure is not silently misreported as "Login required".
@@ -6649,6 +6677,12 @@ async def run_tui_app(
         )
         provider = LoginRequiredProvider(startup_message)
         runtime_provider_config = None
+    if record is not None and (
+        temperature is not None or session_temperature != stored_temperature
+    ):
+        updated_record = manager.touch_session(record.id, temperature=session_temperature)
+        if updated_record is not None:
+            record = updated_record
     session: CodingSession | None = None
     try:
         index_on_first_persist = False
@@ -6657,6 +6691,7 @@ async def run_tui_app(
                 manager,
                 cwd=cwd,
                 selection=selection,
+                temperature=session_temperature,
             )
             index_on_first_persist = manager.get_session(record.id) is None
 
@@ -6671,6 +6706,7 @@ async def run_tui_app(
                 provider_name=selection.provider.name,
                 provider_settings=provider_settings,
                 runtime_provider_config=runtime_provider_config,
+                temperature=session_temperature,
                 auto_compact_token_threshold=auto_compact_token_threshold,
                 index_on_first_persist=index_on_first_persist,
                 shell_command_prefix=shell_settings.shell_command_prefix,

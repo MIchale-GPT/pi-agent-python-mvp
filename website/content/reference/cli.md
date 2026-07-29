@@ -50,10 +50,18 @@ features and fixes.
 | `--session TEXT` | Resume a session id in the TUI |
 | `--new-session` | Start a new session instead of resuming the default |
 | `--auto-compact-threshold INT` | Auto-compact above this rough token estimate |
+| `--temperature FLOAT` | Sampling temperature from `0` through `2`; omitted means provider default |
 | `-e, --extension PATH` | Load an [extension]({{< relref "../guides/extensions.md" >}}) file or directory (repeatable) |
 | `--no-extensions` | Disable extension directory discovery (explicit `-e` paths still load) |
 | `--project-extensions` | Also load `<project>/.tau/extensions` (runs project-supplied code at startup) |
 | `-v, --version` | Print the version and exit |
+
+Temperature is currently supported only for OpenAI-compatible Chat Completions
+models. Tau rejects an explicit value for Codex, Responses API models, and
+other provider adapters instead of silently ignoring it. On resume, omitting
+the flag preserves the temperature stored in the session while the configured
+provider/model still supports it; otherwise Tau resets the session to the
+provider default.
 
 `--resume`, `--prompt`, `-o/--output`, and `-x` are removed; each now exits
 with an error naming its replacement (`--session`, `--print`, `--mode`, and

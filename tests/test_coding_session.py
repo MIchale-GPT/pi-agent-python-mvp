@@ -1178,7 +1178,7 @@ async def test_session_refreshes_runtime_provider_for_thinking_level(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    created: list[tuple[str | None, str | None]] = []
+    created: list[tuple[str | None, str | None, float | None]] = []
 
     def create_provider(
         provider_config: object,
@@ -1186,9 +1186,10 @@ async def test_session_refreshes_runtime_provider_for_thinking_level(
         credential_store: FileCredentialStore | None = None,
         model: str | None = None,
         thinking_level: str | None = None,
+        temperature: float | None = None,
     ) -> SwitchableFakeProvider:
         del provider_config, credential_store
-        created.append((model, thinking_level))
+        created.append((model, thinking_level, temperature))
         return SwitchableFakeProvider(object())
 
     monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
@@ -1211,14 +1212,79 @@ async def test_session_refreshes_runtime_provider_for_thinking_level(
             provider_settings=ProviderSettings(providers=(provider_config,)),
             runtime_provider_config=provider_config,
             thinking_level="high",
+            temperature=0.2,
         )
     )
 
-    assert created == [("reasoner", "high")]
+    assert session.temperature == 0.2
+    assert created == [("reasoner", "high", 0.2)]
 
     await session.set_thinking_level("low")
 
-    assert created[-1] == ("reasoner", "low")
+    assert created[-1] == ("reasoner", "low", 0.2)
+
+    await session.aclose()
+
+
+@pytest.mark.anyio
+async def test_session_model_switch_resets_temperature_for_unsupported_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    isolate_home(monkeypatch, tmp_path)
+    created: list[tuple[str | None, float | None]] = []
+
+    def create_provider(
+        provider_config: object,
+        *,
+        credential_store: FileCredentialStore | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+        temperature: float | None = None,
+    ) -> SwitchableFakeProvider:
+        del credential_store, thinking_level
+        created.append((model, temperature))
+        return SwitchableFakeProvider(provider_config)
+
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+    provider_config = OpenAICompatibleProviderConfig(
+        name="temperature-test",
+        models=("chat-model", "responses-model"),
+        default_model="chat-model",
+        model_metadata={
+            "responses-model": ProviderModelMetadata(api="openai-responses"),
+        },
+    )
+    paths = TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents")
+    manager = SessionManager(paths)
+    record = manager.create_session(
+        cwd=tmp_path,
+        model="chat-model",
+        provider_name="temperature-test",
+        temperature=0.2,
+    )
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model="chat-model",
+            system="You are Tau.",
+            storage=JsonlSessionStorage(record.path),
+            cwd=tmp_path,
+            session_id=record.id,
+            session_manager=manager,
+            provider_name="temperature-test",
+            provider_settings=ProviderSettings(providers=(provider_config,)),
+            runtime_provider_config=provider_config,
+            resource_paths=TauResourcePaths(root=paths.home, paths=paths),
+            temperature=0.2,
+        )
+    )
+
+    session.set_model("responses-model")
+
+    assert session.temperature is None
+    assert created[-1] == ("responses-model", None)
+    assert manager.get_session(record.id).temperature is None  # type: ignore[union-attr]
 
     await session.aclose()
 
@@ -2607,6 +2673,78 @@ async def test_session_provider_settings_reload_uses_session_paths(
 
 
 @pytest.mark.anyio
+async def test_provider_settings_reload_resets_unsupported_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: list[tuple[str | None, float | None]] = []
+
+    def create_provider(
+        provider_config: object,
+        *,
+        credential_store: FileCredentialStore | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+        temperature: float | None = None,
+    ) -> SwitchableFakeProvider:
+        del credential_store, thinking_level
+        created.append((model, temperature))
+        return SwitchableFakeProvider(provider_config)
+
+    initial_provider = OpenAICompatibleProviderConfig(
+        name="temperature-test",
+        models=("shared-model",),
+        default_model="shared-model",
+    )
+    reloaded_provider = OpenAICompatibleProviderConfig(
+        name="temperature-test",
+        models=("shared-model",),
+        default_model="shared-model",
+        model_metadata={
+            "shared-model": ProviderModelMetadata(api="openai-responses"),
+        },
+    )
+    paths = TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents")
+    manager = SessionManager(paths)
+    record = manager.create_session(
+        cwd=tmp_path,
+        model="shared-model",
+        provider_name="temperature-test",
+        temperature=0.2,
+    )
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+    monkeypatch.setattr(
+        coding_session_module,
+        "load_provider_settings",
+        lambda paths=None: ProviderSettings(providers=(reloaded_provider,)),
+    )
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model="shared-model",
+            system="You are Tau.",
+            storage=JsonlSessionStorage(record.path),
+            cwd=tmp_path,
+            session_id=record.id,
+            session_manager=manager,
+            provider_name="temperature-test",
+            provider_settings=ProviderSettings(providers=(initial_provider,)),
+            runtime_provider_config=initial_provider,
+            resource_paths=TauResourcePaths(root=paths.home, paths=paths),
+            temperature=0.2,
+        )
+    )
+
+    session.reload_provider_settings()
+
+    assert session.temperature is None
+    assert created[-1] == ("shared-model", None)
+    assert manager.get_session(record.id).temperature is None  # type: ignore[union-attr]
+
+    await session.aclose()
+
+
+@pytest.mark.anyio
 async def test_session_compact_persists_summary_and_rebuilds_context(tmp_path: Path) -> None:
     storage = JsonlSessionStorage(tmp_path / "session.jsonl")
     provider = FakeProvider(
@@ -3648,7 +3786,12 @@ async def test_session_new_session_is_indexed_after_first_message(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     manager = SessionManager(TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents"))
-    current_record = manager.create_session(cwd=tmp_path, model="fake", provider_name="fake")
+    current_record = manager.create_session(
+        cwd=tmp_path,
+        model="fake",
+        provider_name="fake",
+        temperature=0.2,
+    )
     settings = ProviderSettings(
         default_provider="openai",
         providers=(
@@ -3666,8 +3809,10 @@ async def test_session_new_session_is_indexed_after_first_message(
         credential_store: FileCredentialStore | None = None,
         model: str | None = None,
         thinking_level: str | None = None,
+        temperature: float | None = None,
     ) -> FakeProvider:
         del provider_config, credential_store, model, thinking_level
+        assert temperature == 0.2
         return FakeProvider(
             [
                 [
@@ -3693,6 +3838,7 @@ async def test_session_new_session_is_indexed_after_first_message(
             session_manager=manager,
             provider_name="fake",
             provider_settings=settings,
+            temperature=0.2,
         )
     )
 
@@ -3709,8 +3855,104 @@ async def test_session_new_session_is_indexed_after_first_message(
     assert indexed is not None
     assert indexed.provider_name == "openai"
     assert indexed.model == "gpt-5"
+    assert indexed.temperature == 0.2
     assert indexed.title == "Greeting"
     assert indexed.path.exists()
+
+
+@pytest.mark.anyio
+async def test_session_indexing_preserves_pending_temperature(tmp_path: Path) -> None:
+    manager = SessionManager(TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents"))
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model="chat-model",
+            system="You are Tau.",
+            storage=JsonlSessionStorage(tmp_path / "pending-temperature.jsonl"),
+            cwd=tmp_path,
+            session_id="pending-temperature",
+            session_manager=manager,
+            provider_name="temperature-test",
+            temperature=0.2,
+            index_on_first_persist=True,
+        )
+    )
+
+    session.ensure_session_indexed()
+
+    indexed = manager.get_session("pending-temperature")
+    assert indexed is not None
+    assert indexed.temperature == 0.2
+
+
+@pytest.mark.anyio
+async def test_new_session_resets_temperature_for_unsupported_default_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: list[tuple[str, str | None, float | None]] = []
+
+    def create_provider(
+        provider_config: object,
+        *,
+        credential_store: FileCredentialStore | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+        temperature: float | None = None,
+    ) -> SwitchableFakeProvider:
+        del credential_store, thinking_level
+        created.append((provider_config.name, model, temperature))  # type: ignore[attr-defined]
+        return SwitchableFakeProvider(provider_config)
+
+    current_provider = OpenAICompatibleProviderConfig(
+        name="temperature-test",
+        models=("chat-model",),
+        default_model="chat-model",
+    )
+    default_provider = OpenAICodexProviderConfig(
+        models=("gpt-5.5",),
+        default_model="gpt-5.5",
+    )
+    settings = ProviderSettings(
+        default_provider="openai-codex",
+        providers=(current_provider, default_provider),
+    )
+    manager = SessionManager(TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents"))
+    current_record = manager.create_session(
+        cwd=tmp_path,
+        model="chat-model",
+        provider_name="temperature-test",
+        temperature=0.2,
+    )
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model="chat-model",
+            system="You are Tau.",
+            storage=JsonlSessionStorage(current_record.path),
+            cwd=tmp_path,
+            session_id=current_record.id,
+            session_manager=manager,
+            provider_name="temperature-test",
+            provider_settings=settings,
+            runtime_provider_config=current_provider,
+            temperature=0.2,
+        )
+    )
+    created.clear()
+
+    await session.new_session()
+    session.ensure_session_indexed()
+
+    assert session.provider_name == "openai-codex"
+    assert session.temperature is None
+    assert created == [("openai-codex", "gpt-5.5", None)]
+    indexed = manager.get_session(session.session_id or "")
+    assert indexed is not None
+    assert indexed.temperature is None
+
+    await session.aclose()
 
 
 @pytest.mark.anyio
@@ -3847,6 +4089,93 @@ async def test_session_resume_uses_target_session_provider_model(
     assert session.provider_name == "local"
     assert session.model == "qwen"
     assert created == [("local", "qwen")]
+
+
+@pytest.mark.parametrize(
+    ("model_api", "expected_temperature"),
+    [(None, 0.2), ("openai-responses", None)],
+)
+@pytest.mark.anyio
+async def test_session_resume_reconciles_temperature_with_target_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_api: str | None,
+    expected_temperature: float | None,
+) -> None:
+    manager = SessionManager(TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents"))
+    first_record = manager.create_session(
+        cwd=tmp_path / "first",
+        model="chat-model",
+        provider_name="current",
+    )
+    second_cwd = tmp_path / "second"
+    second_cwd.mkdir(parents=True)
+    second_record = manager.create_session(
+        cwd=second_cwd,
+        model="changed-model",
+        provider_name="changed",
+        temperature=0.2,
+    )
+    current_provider = OpenAICompatibleProviderConfig(
+        name="current",
+        models=("chat-model",),
+        default_model="chat-model",
+    )
+    changed_provider = OpenAICompatibleProviderConfig(
+        name="changed",
+        models=("changed-model",),
+        default_model="changed-model",
+        model_metadata=(
+            {"changed-model": ProviderModelMetadata(api=model_api)} if model_api else {}
+        ),
+    )
+    settings = ProviderSettings(
+        default_provider="current",
+        providers=(current_provider, changed_provider),
+    )
+    created: list[tuple[str, str | None, float | None]] = []
+
+    def create_provider(
+        provider_config: object,
+        *,
+        credential_store: FileCredentialStore | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+        temperature: float | None = None,
+    ) -> SwitchableFakeProvider:
+        del credential_store, thinking_level
+        created.append((provider_config.name, model, temperature))  # type: ignore[attr-defined]
+        return SwitchableFakeProvider(provider_config)
+
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+    second_storage = JsonlSessionStorage(second_record.path)
+    await second_storage.append(SessionInfoEntry(cwd=str(second_record.cwd)))
+    await second_storage.append(ModelChangeEntry(model="changed-model"))
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model="chat-model",
+            system="You are Tau.",
+            storage=JsonlSessionStorage(first_record.path),
+            cwd=first_record.cwd,
+            session_id=first_record.id,
+            session_manager=manager,
+            provider_name="current",
+            provider_settings=settings,
+            runtime_provider_config=current_provider,
+        )
+    )
+    created.clear()
+
+    await session.resume(second_record.id)
+
+    assert session.temperature == expected_temperature
+    assert created == [("changed", "changed-model", expected_temperature)]
+    updated = manager.get_session(second_record.id)
+    assert updated is not None
+    assert updated.temperature == expected_temperature
+
+    await session.aclose()
 
 
 @pytest.mark.anyio

@@ -32,8 +32,10 @@ from tau_coding.provider_config import (
     ProviderConfig,
     ProviderConfigError,
     anthropic_config_from_provider,
+    normalize_temperature,
     openai_compatible_config_from_provider,
     provider_model_supports_images,
+    provider_supports_temperature,
     provider_thinking_levels,
     validate_provider_model,
 )
@@ -54,10 +56,19 @@ def create_model_provider(
     credential_store: FileCredentialStore | None = None,
     model: str | None = None,
     thinking_level: ThinkingLevel | None = None,
+    temperature: float | None = None,
 ) -> ClosableModelProvider:
     """Create a runtime model provider from durable provider settings."""
     if model is not None:
         validate_provider_model(provider, model)
+    selected_model = model or provider.default_model
+    normalized_temperature = normalize_temperature(temperature)
+    if normalized_temperature is not None and not provider_supports_temperature(
+        provider, selected_model
+    ):
+        raise ProviderConfigError(
+            f"Temperature is not supported for {provider.name}:{selected_model}"
+        )
     credentials = credential_store or FileCredentialStore()
     if isinstance(provider, AnthropicProviderConfig):
         credential = _oauth_credential(provider, credentials)
@@ -109,6 +120,7 @@ def create_model_provider(
             credential_reader=credentials,
             model=model,
             thinking_level=thinking_level,
+            temperature=normalized_temperature,
         )
         if credential is not None:
             runtime_auth = _required_oauth_provider(provider.name).runtime_auth(credential)

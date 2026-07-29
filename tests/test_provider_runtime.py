@@ -26,6 +26,78 @@ def test_create_model_provider_returns_openai_codex_provider(tmp_path) -> None:
     assert isinstance(provider, OpenAICodexProvider)
 
 
+def test_create_model_provider_applies_temperature_to_openai_chat_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("TAU_TEST_API_KEY", "test-key")
+    store = FileCredentialStore(tmp_path / "credentials.json")
+    config = OpenAICompatibleProviderConfig(
+        name="local",
+        api_key_env="TAU_TEST_API_KEY",
+        models=("qwen",),
+        default_model="qwen",
+    )
+
+    provider = create_model_provider(
+        config,
+        credential_store=store,
+        model="qwen",
+        temperature=0.0,
+    )
+
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider._config.temperature == 0.0
+
+
+@pytest.mark.parametrize("temperature", [-0.1, 2.1])
+def test_create_model_provider_rejects_temperature_outside_openai_range(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    temperature: float,
+) -> None:
+    monkeypatch.setenv("TAU_TEST_API_KEY", "test-key")
+    config = OpenAICompatibleProviderConfig(
+        name="local",
+        api_key_env="TAU_TEST_API_KEY",
+        models=("qwen",),
+        default_model="qwen",
+    )
+
+    with pytest.raises(ProviderConfigError, match="between 0 and 2"):
+        create_model_provider(config, model="qwen", temperature=temperature)
+
+
+def test_create_model_provider_rejects_temperature_for_codex(tmp_path) -> None:
+    store = FileCredentialStore(tmp_path / "credentials.json")
+
+    with pytest.raises(
+        ProviderConfigError,
+        match="Temperature is not supported for openai-codex:gpt-5.5",
+    ):
+        create_model_provider(
+            OpenAICodexProviderConfig(),
+            credential_store=store,
+            model="gpt-5.5",
+            temperature=0.0,
+        )
+
+
+def test_create_model_provider_rejects_temperature_for_anthropic(tmp_path) -> None:
+    store = FileCredentialStore(tmp_path / "credentials.json")
+
+    with pytest.raises(
+        ProviderConfigError,
+        match="Temperature is not supported for anthropic:claude-sonnet-4-6",
+    ):
+        create_model_provider(
+            AnthropicProviderConfig(),
+            credential_store=store,
+            model="claude-sonnet-4-6",
+            temperature=0.0,
+        )
+
+
 def test_create_model_provider_uses_codex_model_image_capability(tmp_path) -> None:
     store = FileCredentialStore(tmp_path / "credentials.json")
     config = provider_config_from_catalog_entry("openai-codex")

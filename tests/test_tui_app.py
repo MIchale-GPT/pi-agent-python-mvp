@@ -50,6 +50,7 @@ from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.provider_config import (
     OpenAICodexProviderConfig,
     OpenAICompatibleProviderConfig,
+    ProviderModelMetadata,
     ProviderSettings,
     ScopedModelConfig,
     save_provider_settings,
@@ -7827,8 +7828,9 @@ async def test_run_tui_app_creates_new_session_by_default(
             cwd: Path,
             model: str,
             provider_name: str | None = None,
+            temperature: float | None = None,
         ) -> CodingSessionRecord:
-            calls.append(f"prepare:{cwd}:{model}:{provider_name}")
+            calls.append(f"prepare:{cwd}:{model}:{provider_name}:{temperature}")
             return record
 
         def get_session(self, session_id: str) -> CodingSessionRecord | None:
@@ -7842,6 +7844,7 @@ async def test_run_tui_app_creates_new_session_by_default(
         @classmethod
         async def load(cls, config: object) -> str:
             assert config.provider_name == "local"  # type: ignore[attr-defined]
+            assert config.temperature == 0.2  # type: ignore[attr-defined]
             assert config.auto_compact_token_threshold == 1000  # type: ignore[attr-defined]
             assert config.index_on_first_persist is True  # type: ignore[attr-defined]
             calls.append("load")
@@ -7869,10 +7872,15 @@ async def test_run_tui_app_creates_new_session_by_default(
         ),
     )
     monkeypatch.setattr(tui_app, "load_provider_settings", lambda: settings)
+
+    def create_provider(provider: object, **kwargs: object) -> FakeProvider:
+        assert kwargs["temperature"] == 0.2
+        return FakeProvider()
+
     monkeypatch.setattr(
         tui_app,
         "create_model_provider",
-        lambda provider, **kwargs: FakeProvider(),
+        create_provider,
     )
     monkeypatch.setattr(tui_app, "CodingSession", FakeCodingSession)
     monkeypatch.setattr(tui_app, "TauTuiApp", FakeApp)
@@ -7882,13 +7890,14 @@ async def test_run_tui_app_creates_new_session_by_default(
         model=None,
         cwd=tmp_path,
         provider_name="local",
+        temperature=0.2,
         auto_compact_token_threshold=1000,
         initial_prompt="explain this repo",
         session_manager=FakeManager(),
     )
 
     assert calls == [
-        f"prepare:{tmp_path}:local-model:local",
+        f"prepare:{tmp_path}:local-model:local:0.2",
         "get:new-session",
         "load",
         "run",
@@ -8066,9 +8075,16 @@ async def test_run_tui_app_opens_when_provider_login_is_missing(
     assert calls == [f"prepare:{tmp_path}:gpt-5.4:openai", "load:LoginRequiredProvider", "run"]
 
 
+@pytest.mark.parametrize(
+    ("model_api", "expected_temperature"),
+    [(None, 0.2), ("openai-responses", None)],
+)
 @pytest.mark.anyio
 async def test_run_tui_app_resumes_explicit_session(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_api: str | None,
+    expected_temperature: float | None,
 ) -> None:
     isolate_home(monkeypatch, tmp_path)
     calls: list[str] = []
@@ -8081,6 +8097,7 @@ async def test_run_tui_app_resumes_explicit_session(
         created_at=1.0,
         updated_at=1.0,
         provider_name="local",
+        temperature=0.2,
     )
 
     class FakeProvider:
@@ -8101,11 +8118,20 @@ async def test_run_tui_app_resumes_explicit_session(
             calls.append(f"get:{session_id}")
             return record
 
+        def touch_session(
+            self,
+            session_id: str,
+            *,
+            temperature: float | None = None,
+        ) -> None:
+            calls.append(f"touch:{session_id}:{temperature}")
+
     class FakeCodingSession:
         @classmethod
         async def load(cls, config: object) -> str:
             assert config.provider_name == "local"  # type: ignore[attr-defined]
             assert config.model == "fake-model"  # type: ignore[attr-defined]
+            assert config.temperature == expected_temperature  # type: ignore[attr-defined]
             calls.append("load")
             return "session"
 
@@ -8131,6 +8157,9 @@ async def test_run_tui_app_resumes_explicit_session(
                 api_key_env="LOCAL_API_KEY",
                 models=("fake-model",),
                 default_model="fake-model",
+                model_metadata=(
+                    {"fake-model": ProviderModelMetadata(api=model_api)} if model_api else {}
+                ),
             ),
         ),
     )
@@ -8139,7 +8168,8 @@ async def test_run_tui_app_resumes_explicit_session(
         tui_app,
         "create_model_provider",
         lambda provider, **kwargs: (
-            calls.append(f"provider:{provider.name}:{kwargs['model']}") or FakeProvider()
+            calls.append(f"provider:{provider.name}:{kwargs['model']}:{kwargs.get('temperature')}")
+            or FakeProvider()
         ),
     )
     monkeypatch.setattr(tui_app, "CodingSession", FakeCodingSession)
@@ -8153,13 +8183,14 @@ async def test_run_tui_app_resumes_explicit_session(
         session_manager=FakeManager(),
     )
 
-    assert calls == [
+    expected_calls = [
         "get:session-1",
-        "provider:local:fake-model",
-        "load",
-        "run",
-        "provider_closed",
+        f"provider:local:fake-model:{expected_temperature}",
     ]
+    if expected_temperature is None:
+        expected_calls.append("touch:session-1:None")
+    expected_calls.extend(["load", "run", "provider_closed"])
+    assert calls == expected_calls
 
 
 @pytest.mark.anyio

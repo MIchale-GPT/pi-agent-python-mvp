@@ -9,7 +9,7 @@ const state = {
   liveMessage: null,
   sessionOptions: null,
 };
-const { createAndEnterSession } = globalThis.TauSessionActions;
+const { createAndEnterSession, resolveTemperature } = globalThis.TauSessionActions;
 
 const shell = document.querySelector(".shell");
 const sessionList = document.querySelector("#session-list");
@@ -32,6 +32,10 @@ const newSessionForm = document.querySelector("#new-session-form");
 const newSessionCwd = document.querySelector("#new-session-cwd");
 const newSessionProvider = document.querySelector("#new-session-provider");
 const newSessionModel = document.querySelector("#new-session-model");
+const newSessionTemperatureMode = document.querySelector("#new-session-temperature-mode");
+const newSessionTemperatureField = document.querySelector("#new-session-temperature-field");
+const newSessionTemperature = document.querySelector("#new-session-temperature");
+const newSessionTemperatureHelp = document.querySelector("#new-session-temperature-help");
 const createSessionSubmit = document.querySelector("#create-session-submit");
 const renameSessionDialog = document.querySelector("#rename-session-dialog");
 const renameSessionForm = document.querySelector("#rename-session-form");
@@ -167,6 +171,7 @@ function renderNoSessionSelected() {
   document.querySelector("#active-session-state").textContent = "NONE";
   document.querySelector("#fact-provider").textContent = "—";
   document.querySelector("#fact-model").textContent = "—";
+  document.querySelector("#fact-temperature").textContent = "—";
   document.querySelector("#fact-messages").textContent = "—";
   document.querySelector("#fact-updated").textContent = "—";
   transcriptContent.replaceChildren();
@@ -386,6 +391,10 @@ function setSessionFacts(session, messageCount) {
   document.querySelector("#active-session-state").textContent = "LOADED";
   document.querySelector("#fact-provider").textContent = session.providerName || "—";
   document.querySelector("#fact-model").textContent = session.model || "—";
+  document.querySelector("#fact-temperature").textContent =
+    session.temperature === null || session.temperature === undefined
+      ? "auto"
+      : String(session.temperature);
   document.querySelector("#fact-messages").textContent = String(messageCount);
   document.querySelector("#fact-updated").textContent = formatRelative(session.updatedAt);
 }
@@ -653,6 +662,36 @@ function populateModelChoices(selectedModel) {
       ? selectedModel
       : provider?.defaultModel;
   if (preferredModel) newSessionModel.value = preferredModel;
+  syncTemperatureControls();
+}
+
+function selectedTemperatureCapability() {
+  const provider = state.sessionOptions?.providers.find(
+    (item) => item.name === newSessionProvider.value,
+  );
+  const range = provider?.temperatureRange || { min: 0, max: 2, step: "any" };
+  return {
+    supported: Boolean(provider?.temperatureModels?.includes(newSessionModel.value)),
+    min: range.min,
+    max: range.max,
+    step: range.step,
+  };
+}
+
+function syncTemperatureControls() {
+  const capability = selectedTemperatureCapability();
+  if (!capability.supported) newSessionTemperatureMode.value = "auto";
+  newSessionTemperatureMode.disabled = !capability.supported;
+  const custom = capability.supported && newSessionTemperatureMode.value === "custom";
+  newSessionTemperatureField.hidden = !custom;
+  newSessionTemperature.disabled = !custom;
+  newSessionTemperature.required = custom;
+  newSessionTemperature.min = String(capability.min);
+  newSessionTemperature.max = String(capability.max);
+  newSessionTemperature.step = String(capability.step);
+  newSessionTemperatureHelp.textContent = capability.supported
+    ? "自动模式不会发送温度参数；精确模式发送 0。"
+    : "该模型由服务端控制随机性，Tau 不会发送温度参数。";
 }
 
 function populateSessionOptions(options) {
@@ -675,6 +714,7 @@ function populateSessionOptions(options) {
     newSessionProvider.append(option);
   });
   newSessionProvider.value = options.defaultProvider;
+  newSessionTemperatureMode.value = "auto";
   populateModelChoices();
 }
 
@@ -742,6 +782,8 @@ document.querySelector("#new-session-button").addEventListener("click", async ()
 });
 
 newSessionProvider.addEventListener("change", () => populateModelChoices());
+newSessionModel.addEventListener("change", syncTemperatureControls);
+newSessionTemperatureMode.addEventListener("change", syncTemperatureControls);
 
 newSessionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -749,13 +791,24 @@ newSessionForm.addEventListener("submit", async (event) => {
   const providerName = newSessionProvider.value;
   const model = newSessionModel.value;
   if (!cwd || !providerName || !model || createSessionSubmit.disabled) return;
+  let temperature;
+  try {
+    temperature = resolveTemperature(
+      newSessionTemperatureMode.value,
+      newSessionTemperature.value,
+      selectedTemperatureCapability(),
+    );
+  } catch (error) {
+    setFormError("#new-session-error", error.message);
+    return;
+  }
 
   createSessionSubmit.disabled = true;
   createSessionSubmit.textContent = "正在创建…";
   setFormError("#new-session-error");
   try {
     await createAndEnterSession(
-      { cwd, providerName, model },
+      { cwd, providerName, model, temperature },
       {
         createSession: (options) => postJson("/api/sessions", options),
         registerSession: (session) => {

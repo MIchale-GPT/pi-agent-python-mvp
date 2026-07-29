@@ -20,8 +20,13 @@ from tau_agent.provider import CancellationToken, ModelProvider
 from tau_agent.provider_events import AssistantMessageEvent
 from tau_agent.session import JsonlSessionStorage, LeafEntry, MessageEntry, entry_to_json_line
 from tau_agent.tools import AgentTool
+from tau_coding import session as coding_session_module
 from tau_coding.paths import TauPaths
-from tau_coding.provider_config import OpenAICompatibleProviderConfig, ProviderSettings
+from tau_coding.provider_config import (
+    OpenAICompatibleProviderConfig,
+    ProviderModelMetadata,
+    ProviderSettings,
+)
 from tau_coding.resources import TauResourcePaths
 from tau_coding.session import CodingSession, CodingSessionConfig
 from tau_coding.session_manager import CodingSessionRecord, SessionManager
@@ -91,6 +96,7 @@ def test_session_list_payload_exposes_safe_session_metadata(tmp_path: Path) -> N
                 "cwd": str(cwd.resolve()),
                 "model": "gpt-5.4",
                 "providerName": "openai",
+                "temperature": None,
                 "title": "Build the web workspace",
                 "createdAt": record.created_at,
                 "updatedAt": record.updated_at,
@@ -184,6 +190,9 @@ def test_web_server_serves_live_a_theme_and_session_api(tmp_path: Path) -> None:
         assert 'class="mode-pill">LIVE' in page_body
         assert "READ ONLY" not in page_body
         assert 'id="new-session-dialog"' in page_body
+        assert 'id="new-session-temperature-mode"' in page_body
+        assert 'id="new-session-temperature"' in page_body
+        assert 'step="any"' in page_body
         assert 'id="rename-session-dialog"' in page_body
         assert 'id="delete-session-dialog"' in page_body
         assert 'data-confirmation="DELETE"' in page_body
@@ -259,6 +268,8 @@ def test_session_options_and_create_api_open_a_configured_project_session(
                 "name": "fake-provider",
                 "models": ["fake-small", "fake-large"],
                 "defaultModel": "fake-large",
+                "temperatureModels": ["fake-small", "fake-large"],
+                "temperatureRange": {"min": 0.0, "max": 2.0, "step": "any"},
             }
         ]
 
@@ -269,6 +280,7 @@ def test_session_options_and_create_api_open_a_configured_project_session(
                 "cwd": str(cwd),
                 "providerName": "fake-provider",
                 "model": "fake-small",
+                "temperature": 0.2,
             },
         )
 
@@ -277,8 +289,11 @@ def test_session_options_and_create_api_open_a_configured_project_session(
         assert session["cwd"] == str(cwd.resolve())
         assert session["providerName"] == "fake-provider"
         assert session["model"] == "fake-small"
+        assert session["temperature"] == 0.2
         assert session["title"] is None
-        assert manager.get_session(session["id"]) is not None
+        stored = manager.get_session(session["id"])
+        assert stored is not None
+        assert stored.temperature == 0.2
 
         status, detail = _get_json(connection, f"/api/sessions/{session['id']}")
         assert status == 200
@@ -300,6 +315,7 @@ const options = {
   cwd: "/workspace/tau",
   providerName: "fake-provider",
   model: "fake-model",
+  temperature: 0.2,
 };
 const created = {
   id: "session-new",
@@ -334,6 +350,7 @@ globalThis.TauSessionActions.createAndEnterSession(options, {
                     "cwd": "/workspace/tau",
                     "providerName": "fake-provider",
                     "model": "fake-model",
+                    "temperature": 0.2,
                 },
             ],
             ["register", "session-new"],
@@ -341,6 +358,105 @@ globalThis.TauSessionActions.createAndEnterSession(options, {
         ],
         "returnedSessionId": "session-new",
     }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_browser_temperature_controller_resolves_auto_precise_and_custom_modes() -> None:
+    controller_path = Path(web_module.__file__).parent / "data" / "web" / "session-actions.js"
+    script = """
+require(process.argv[1]);
+const resolve = globalThis.TauSessionActions.resolveTemperature;
+const capability = { supported: true, min: 0, max: 2 };
+const result = {
+  automatic: resolve("auto", "", capability),
+  precise: resolve("precise", "", capability),
+  custom: resolve("custom", "0.35", capability),
+  unsupported: resolve("precise", "", { ...capability, supported: false }),
+};
+let invalid;
+try {
+  resolve("custom", "2.1", capability);
+} catch (error) {
+  invalid = error.message;
+}
+console.log(JSON.stringify({ result, invalid }));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", script, str(controller_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "result": {
+            "automatic": None,
+            "precise": 0,
+            "custom": 0.35,
+            "unsupported": None,
+        },
+        "invalid": "Temperature must be between 0 and 2",
+    }
+
+
+@pytest.mark.parametrize(
+    ("model_api", "expected_temperature"),
+    [(None, 0.2), ("openai-responses", None)],
+)
+@pytest.mark.anyio
+async def test_web_load_reconciles_stored_temperature_with_model_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_api: str | None,
+    expected_temperature: float | None,
+) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="changed-model",
+        provider_name="changed",
+        temperature=0.2,
+    )
+    provider_config = OpenAICompatibleProviderConfig(
+        name="changed",
+        models=("changed-model",),
+        default_model="changed-model",
+        model_metadata=(
+            {"changed-model": ProviderModelMetadata(api=model_api)} if model_api else {}
+        ),
+    )
+    created_temperatures: list[float | None] = []
+
+    class FakeProvider:
+        async def aclose(self) -> None:
+            return None
+
+    def create_provider(provider: object, **kwargs: object) -> FakeProvider:
+        del provider
+        temperature = kwargs.get("temperature")
+        created_temperatures.append(temperature if isinstance(temperature, float) else None)
+        return FakeProvider()
+
+    monkeypatch.setattr(
+        web_module,
+        "load_provider_settings",
+        lambda paths: ProviderSettings(providers=(provider_config,)),
+    )
+    monkeypatch.setattr(web_module, "create_model_provider", create_provider)
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+
+    handle = await web_module._load_web_session(record, manager)
+
+    assert handle.session.temperature == expected_temperature
+    assert created_temperatures == [expected_temperature, expected_temperature]
+    updated = manager.get_session(record.id)
+    assert updated is not None
+    assert updated.temperature == expected_temperature
+
+    await handle.aclose()
 
 
 def test_create_api_rejects_unknown_directories_and_provider_models(
@@ -355,7 +471,7 @@ def test_create_api_rejects_unknown_directories_and_provider_models(
         providers=(
             OpenAICompatibleProviderConfig(
                 name="fake-provider",
-                models=("fake-model",),
+                models=("fake-model", "gpt-5.4"),
                 default_model="fake-model",
             ),
         ),
@@ -391,6 +507,32 @@ def test_create_api_rejects_unknown_directories_and_provider_models(
         )
         assert status == 422
         assert unknown_model["error"] == "provider_selection_invalid"
+
+        status, invalid_temperature = _post_json(
+            connection,
+            "/api/sessions",
+            {
+                "cwd": str(cwd),
+                "providerName": "fake-provider",
+                "model": "fake-model",
+                "temperature": 2.1,
+            },
+        )
+        assert status == 422
+        assert invalid_temperature["error"] == "temperature_invalid"
+
+        status, unsupported_temperature = _post_json(
+            connection,
+            "/api/sessions",
+            {
+                "cwd": str(cwd),
+                "providerName": "fake-provider",
+                "model": "gpt-5.4",
+                "temperature": 0,
+            },
+        )
+        assert status == 422
+        assert unsupported_temperature["error"] == "temperature_unsupported"
         assert manager.list_sessions() == []
     finally:
         connection.close()

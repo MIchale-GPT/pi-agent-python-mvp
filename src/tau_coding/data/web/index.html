@@ -235,6 +235,7 @@
             <dl>
               <div><dt>provider</dt><dd id="fact-provider">—</dd></div>
               <div><dt>model</dt><dd id="fact-model">—</dd></div>
+              <div><dt>temperature</dt><dd id="fact-temperature">—</dd></div>
               <div><dt>messages</dt><dd id="fact-messages">—</dd></div>
               <div><dt>updated</dt><dd id="fact-updated">—</dd></div>
             </dl>
@@ -278,6 +279,37 @@
               <select id="new-session-model" name="model" required></select>
             </label>
           </div>
+          <details class="advanced-settings">
+            <summary>高级生成设置</summary>
+            <div class="advanced-settings-body">
+              <div class="field-grid">
+                <label class="field">
+                  <span>随机性</span>
+                  <select id="new-session-temperature-mode" name="temperatureMode">
+                    <option value="auto">自动（服务商默认）</option>
+                    <option value="precise">精确（0）</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label id="new-session-temperature-field" class="field" hidden>
+                  <span>Temperature</span>
+                  <input
+                    id="new-session-temperature"
+                    name="temperature"
+                    type="number"
+                    min="0"
+                    max="2"
+                    step="any"
+                    value="0.2"
+                    inputmode="decimal"
+                  />
+                </label>
+              </div>
+              <small id="new-session-temperature-help">
+                自动模式不会发送温度参数，由服务商选择默认值。
+              </small>
+            </div>
+          </details>
           <p id="new-session-error" class="form-error" role="alert" hidden></p>
         </div>
         <footer class="modal-actions">

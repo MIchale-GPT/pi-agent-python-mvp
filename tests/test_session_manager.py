@@ -17,9 +17,11 @@ def test_session_manager_creates_and_lists_sessions(tmp_path: Path) -> None:
         model="fake",
         provider_name="fake-provider",
         title="Test session",
+        temperature=0.2,
     )
 
     assert record.provider_name == "fake-provider"
+    assert record.temperature == 0.2
     assert record.path.parent.parent == tmp_path / ".tau" / "sessions"
     assert "project-" in record.path.parent.name
     assert len(record.path.parent.name.rsplit("-", maxsplit=1)[-1]) == 6
@@ -147,7 +149,7 @@ def test_session_manager_touch_updates_metadata(tmp_path: Path) -> None:
     manager = SessionManager(TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents"))
     cwd = tmp_path / "project"
     cwd.mkdir()
-    record = manager.create_session(cwd=cwd, model="fake")
+    record = manager.create_session(cwd=cwd, model="fake", temperature=0.2)
 
     updated = manager.touch_session(
         record.id,
@@ -161,8 +163,21 @@ def test_session_manager_touch_updates_metadata(tmp_path: Path) -> None:
     assert updated.model == "new-model"
     assert updated.provider_name == "new-provider"
     assert updated.title == "Updated"
+    assert updated.temperature == 0.2
     assert updated.updated_at >= record.updated_at
     assert manager.get_session(record.id) == updated
+
+
+def test_session_manager_touch_can_reset_temperature_to_provider_default(tmp_path: Path) -> None:
+    manager = SessionManager(TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents"))
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(cwd=cwd, model="fake", temperature=0.2)
+
+    updated = manager.touch_session(record.id, temperature=None)
+
+    assert updated is not None
+    assert updated.temperature is None
 
 
 def test_session_manager_sorts_newest_updated_first(tmp_path: Path) -> None:

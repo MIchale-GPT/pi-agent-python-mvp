@@ -39,6 +39,7 @@ class OpenAICompatibleConfig:
     max_retry_delay_seconds: float = DEFAULT_OPENAI_COMPATIBLE_MAX_RETRY_DELAY_SECONDS
     api: str = "openai-completions"
     max_tokens: int | None = None
+    temperature: float | None = None
     supports_images: bool = False
     reasoning_effort: str | None = None
     reasoning_effort_parameter: str = "reasoning_effort"

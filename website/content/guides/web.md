@@ -26,7 +26,15 @@ To start fresh, select **New session** in the sidebar:
    machine running `tau-web`;
 2. select a configured Provider;
 3. select one of that Provider's configured models;
-4. select **Create and enter**.
+4. optionally open **Advanced settings** to choose a temperature;
+5. select **Create and enter**.
+
+Temperature defaults to **Auto**, which means Tau omits the request parameter
+and lets the provider or model choose its default. **Precise** sends `0`;
+**Custom** accepts a value from `0` through `2`. Tau currently enables these
+controls only for models using an OpenAI-compatible Chat Completions endpoint.
+They remain disabled for Codex, Responses API models, and providers whose
+adapter does not safely support the parameter.
 
 Tau validates the directory and provider/model pair, creates the session under
 the normal Tau session home, and immediately opens it. Provider credentials
@@ -77,8 +85,10 @@ Delete is permanent: it removes the index entry and the session's JSONL file.
 The dialog requires typing `DELETE`, and Tau refuses deletion while that session
 has an active run. Cancel or wait for the run before deleting it.
 
-Changing the Provider/model/thinking level on an existing session, built-in
-slash commands, and file browsing remain later Web capabilities.
+The selected temperature is stored with the session and shown in the session
+facts. Changing the Provider/model/thinking level or temperature on an existing
+session, built-in slash commands, and file browsing remain later Web
+capabilities.
 
 ## How it is connected
 

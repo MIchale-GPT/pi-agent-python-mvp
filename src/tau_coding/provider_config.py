@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from json import dumps, loads
+from math import isfinite
 from os import environ
 from pathlib import Path
 from shutil import copy2
@@ -21,6 +22,7 @@ from tau_ai.env import (
     OpenAICompatibleConfig,
 )
 from tau_ai.openai_codex import DEFAULT_OPENAI_CODEX_BASE_URL
+from tau_ai.openai_compatible import openai_compatible_supports_temperature
 from tau_coding.catalog_loader import effective_catalog, save_user_catalog_entries
 from tau_coding.credentials import FileCredentialStore, credentials_path
 from tau_coding.oauth_registry import get_oauth_provider
@@ -45,6 +47,8 @@ from tau_coding.thinking import (
 
 DEFAULT_PROVIDER_NAME = "openai"
 DEFAULT_MODEL = "gpt-5.4"
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
 
 
 class ProviderConfigError(ValueError):
@@ -1484,6 +1488,7 @@ def openai_compatible_config_from_provider(
     credential_reader: CredentialReader | None = None,
     model: str | None = None,
     thinking_level: ThinkingLevel | None = None,
+    temperature: float | None = None,
 ) -> OpenAICompatibleConfig:
     """Build OpenAI-compatible runtime config from durable settings."""
     api_key = _api_key_from_provider(provider, credential_reader=credential_reader)
@@ -1506,6 +1511,7 @@ def openai_compatible_config_from_provider(
         timeout_seconds=provider.timeout_seconds,
         max_retries=provider.max_retries,
         max_retry_delay_seconds=provider.max_retry_delay_seconds,
+        temperature=temperature,
         supports_images=provider_model_supports_images(provider, selected_model),
         reasoning_effort=reasoning_effort,
         reasoning_effort_parameter=provider.thinking_parameter or "reasoning_effort",
@@ -1567,6 +1573,40 @@ def provider_kind(provider: ProviderConfig) -> ProviderKind:
         if provider.api == "mistral-conversations":
             return "mistral-conversations"
     return "openai-compatible"
+
+
+def normalize_temperature(value: float | int | None) -> float | None:
+    """Validate and normalize Tau's OpenAI-compatible temperature setting."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProviderConfigError("Temperature must be a number or null")
+    temperature = float(value)
+    if not isfinite(temperature) or not MIN_TEMPERATURE <= temperature <= MAX_TEMPERATURE:
+        raise ProviderConfigError(
+            f"Temperature must be between {MIN_TEMPERATURE:g} and {MAX_TEMPERATURE:g}"
+        )
+    return temperature
+
+
+def provider_supports_temperature(provider: ProviderConfig, model: str | None = None) -> bool:
+    """Return whether Tau can safely send temperature to a provider/model."""
+    if not isinstance(provider, OpenAICompatibleProviderConfig):
+        return False
+    selected_model = model or provider.default_model
+    return openai_compatible_supports_temperature(
+        str(_provider_api(provider, selected_model)),
+        selected_model,
+    )
+
+
+def compatible_temperature(
+    provider: ProviderConfig,
+    model: str,
+    temperature: float | None,
+) -> float | None:
+    """Keep a stored temperature only while its provider/model supports it."""
+    return temperature if provider_supports_temperature(provider, model) else None
 
 
 def provider_has_usable_credentials(

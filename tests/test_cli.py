@@ -212,6 +212,30 @@ def test_json_print_mode_suppresses_update_notice(monkeypatch: pytest.MonkeyPatc
     assert result.stderr == ""
 
 
+def test_print_mode_forwards_explicit_temperature(monkeypatch: pytest.MonkeyPatch) -> None:
+    received_temperature: list[float | None] = []
+
+    async def fake_run_openai_print_mode(
+        prompt: str,
+        model: str | None,
+        cwd: Path,
+        output: PrintOutputMode,
+        provider_name: str | None,
+        *extra: object,
+    ) -> bool:
+        del prompt, model, cwd, output, provider_name
+        received_temperature.append(extra[-1])  # type: ignore[arg-type]
+        return True
+
+    monkeypatch.setattr(cli, "_startup_update_notice", lambda: None)
+    monkeypatch.setattr(cli, "run_openai_print_mode", fake_run_openai_print_mode)
+
+    result = CliRunner().invoke(app, ["--temperature", "0.2", "-p", "hello"])
+
+    assert result.exit_code == 0
+    assert received_temperature == [0.2]
+
+
 def test_utility_command_does_not_check_for_updates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli,

@@ -201,10 +201,45 @@ async def test_openai_compatible_provider_formats_request_and_streams_text() -> 
     assert payload["model"] == "test-model"
     assert payload["stream"] is True
     assert "reasoning_effort" not in payload
+    assert "temperature" not in payload
     assert payload["messages"] == [
         {"role": "system", "content": "You are Tau."},
         {"role": "user", "content": "Say hello"},
     ]
+
+
+@pytest.mark.anyio
+async def test_openai_compatible_provider_includes_configured_temperature() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(
+                api_key="test-key",
+                base_url="https://example.test/v1",
+                temperature=0.2,
+            ),
+            client=client,
+        )
+
+        await _collect(
+            provider.stream_response(
+                model="test-model",
+                system="You are Tau.",
+                messages=[UserMessage(content="Say ok")],
+                tools=[],
+            )
+        )
+
+    assert loads(requests[0].content)["temperature"] == 0.2
 
 
 @pytest.mark.anyio

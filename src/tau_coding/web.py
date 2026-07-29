@@ -36,8 +36,13 @@ from tau_agent.session import (
 from tau_coding.credentials import FileCredentialStore, credentials_path
 from tau_coding.events import CodingSessionEvent
 from tau_coding.provider_config import (
+    MAX_TEMPERATURE,
+    MIN_TEMPERATURE,
     ProviderConfigError,
+    compatible_temperature,
     load_provider_settings,
+    normalize_temperature,
+    provider_supports_temperature,
     resolve_provider_selection,
     resolve_startup_thinking_level,
 )
@@ -191,6 +196,7 @@ class TauWebRuntime:
         cwd: str,
         provider_name: str,
         model: str,
+        temperature: float | None = None,
     ) -> dict[str, object]:
         """Create and index a session from browser-selected options."""
         return self._call(
@@ -198,6 +204,7 @@ class TauWebRuntime:
                 cwd=cwd,
                 provider_name=provider_name,
                 model=model,
+                temperature=temperature,
             )
         )
 
@@ -400,6 +407,7 @@ class TauWebRuntime:
         cwd: str,
         provider_name: str,
         model: str,
+        temperature: float | None,
     ) -> dict[str, object]:
         requested_cwd = Path(cwd).expanduser()
         try:
@@ -427,11 +435,23 @@ class TauWebRuntime:
                 "provider_selection_invalid",
                 str(exc),
             ) from exc
+        try:
+            normalized_temperature = normalize_temperature(temperature)
+        except ProviderConfigError as exc:
+            raise WebSessionValidationError("temperature_invalid", str(exc)) from exc
+        if normalized_temperature is not None and not provider_supports_temperature(
+            selection.provider, selection.model
+        ):
+            raise WebSessionValidationError(
+                "temperature_unsupported",
+                f"Temperature is not supported for {selection.provider.name}:{selection.model}",
+            )
 
         record = self._manager.create_session(
             cwd=resolved_cwd,
             provider_name=selection.provider.name,
             model=selection.model,
+            temperature=normalized_temperature,
         )
         return {"session": _session_metadata(record)}
 
@@ -577,6 +597,16 @@ def session_options_payload(manager: SessionManager) -> dict[str, object]:
                 "name": provider.name,
                 "models": list(provider.models),
                 "defaultModel": provider.default_model,
+                "temperatureModels": [
+                    model
+                    for model in provider.models
+                    if provider_supports_temperature(provider, model)
+                ],
+                "temperatureRange": {
+                    "min": MIN_TEMPERATURE,
+                    "max": MAX_TEMPERATURE,
+                    "step": "any",
+                },
             }
             for provider in settings.providers
         ],
@@ -748,10 +778,22 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
         cwd = body.get("cwd")
         provider_name = body.get("providerName")
         model = body.get("model")
+        temperature = body.get("temperature")
         required_options = (cwd, provider_name, model)
         if not all(isinstance(value, str) and value.strip() for value in required_options):
             self._send_json(
                 {"error": "session_options_required"},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        if temperature is not None and (
+            isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+        ):
+            self._send_json(
+                {
+                    "error": "temperature_invalid",
+                    "message": "Temperature must be a number or null",
+                },
                 status=HTTPStatus.UNPROCESSABLE_ENTITY,
             )
             return
@@ -760,6 +802,7 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
                 cwd=cast(str, cwd).strip(),
                 provider_name=cast(str, provider_name).strip(),
                 model=cast(str, model).strip(),
+                temperature=cast(float | None, temperature),
             )
         except WebSessionValidationError as exc:
             self._send_json(
@@ -1091,6 +1134,7 @@ def _session_metadata(record: CodingSessionRecord) -> dict[str, object]:
         "cwd": str(record.cwd),
         "model": record.model,
         "providerName": record.provider_name,
+        "temperature": record.temperature,
         "title": record.title,
         "createdAt": record.created_at,
         "updatedAt": record.updated_at,
@@ -1192,10 +1236,16 @@ async def _load_web_session(
             model=record.model,
         )
 
+    temperature = compatible_temperature(
+        selection.provider,
+        selection.model,
+        record.temperature,
+    )
     provider = create_model_provider(
         selection.provider,
         credential_store=FileCredentialStore(credentials_path(manager.paths)),
         model=selection.model,
+        temperature=temperature,
         thinking_level=resolve_startup_thinking_level(
             selection.provider,
             selection.model,
@@ -1219,12 +1269,15 @@ async def _load_web_session(
                 provider_name=selection.provider.name,
                 provider_settings=settings,
                 runtime_provider_config=selection.provider,
+                temperature=temperature,
                 shell_command_prefix=load_shell_settings(manager.paths).shell_command_prefix,
             )
         )
     except BaseException:
         await provider.aclose()
         raise
+    if temperature != record.temperature:
+        manager.touch_session(record.id, temperature=temperature)
     return WebSessionHandle(session=session, provider=provider)
 
 

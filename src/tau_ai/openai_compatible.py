@@ -65,6 +65,11 @@ def _use_responses_api(model: str) -> bool:
     return any(normalized.startswith(prefix) for prefix in _RESPONSES_ONLY_PREFIXES)
 
 
+def openai_compatible_supports_temperature(api: str, model: str) -> bool:
+    """Return whether Tau will send temperature for this API/model pair."""
+    return api == "openai-completions" and not _use_responses_api(model)
+
+
 class OpenAICompatibleProvider:
     """Provider adapter for OpenAI-compatible `/chat/completions` APIs.
 
@@ -153,6 +158,7 @@ class OpenAICompatibleProvider:
             thinking_format=self._config.thinking_format,
             compat=self._config.compat,
             max_tokens=self._config.max_tokens,
+            temperature=self._config.temperature,
             include_reasoning_effort_none=self._config.include_reasoning_effort_none,
             supports_images=self._config.supports_images,
         )
@@ -679,6 +685,7 @@ def _build_chat_payload(
     thinking_format: str = "openai",
     compat: Mapping[str, JSONValue] | None = None,
     max_tokens: int | None = None,
+    temperature: float | None = None,
     include_reasoning_effort_none: bool = False,
     supports_images: bool = False,
 ) -> dict[str, JSONValue]:
@@ -705,6 +712,8 @@ def _build_chat_payload(
         payload["max_tokens" if max_tokens_field == "max_tokens" else "max_completion_tokens"] = (
             max_tokens
         )
+    if temperature is not None:
+        payload["temperature"] = temperature
     openrouter_provider = resolved_compat.get("openrouterProvider")
     if isinstance(openrouter_provider, dict):
         payload["provider"] = openrouter_provider

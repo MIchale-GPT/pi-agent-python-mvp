@@ -49,6 +49,7 @@ For the practical frontend contract, see [Building a Custom TUI](../custom-tui.m
 - [Codex Runtime Model Limits](./codex-runtime-model-limits.md)
 - [Provider Retry Events](./provider-retries.md)
 - [Provider/model safety and HTTP error details](./provider-model-safety.md)
+- [Session temperature controls](./session-temperature-controls.md)
 - [Phase 19: Project Context Discovery and Reload](./phase-19-context-discovery.md)
 - [Phase 20: Installation and Configuration Docs](./phase-20-installation-docs.md)
 - [Phase 20.1: Context Accounting Refresh](./phase-20-1-context-accounting.md)

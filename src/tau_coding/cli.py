@@ -163,6 +163,13 @@ def main(
         str | None,
         typer.Option("--model", "-m", help="Model name to request from the provider."),
     ] = None,
+    temperature: Annotated[
+        float | None,
+        typer.Option(
+            "--temperature",
+            help="Sampling temperature from 0 to 2; omit to use the provider default.",
+        ),
+    ] = None,
     setup_base_url: Annotated[
         str,
         typer.Option("--base-url", help="OpenAI-compatible base URL for `tau setup`."),
@@ -370,6 +377,7 @@ def main(
                 extension_paths,
                 not no_extensions,
                 project_extensions,
+                temperature,
             )
         except (RuntimeError, ValueError) as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -400,6 +408,7 @@ def main(
             extension_paths,
             not no_extensions,
             project_extensions,
+            temperature,
         )
     except (RuntimeError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -419,6 +428,7 @@ async def run_openai_tui(
     extension_paths: tuple[Path, ...] = (),
     extensions_enabled: bool = True,
     project_extensions_enabled: bool = False,
+    temperature: float | None = None,
 ) -> str | None:
     """Run the Textual TUI and return its resumable session id, if any."""
     release_notes_notice = startup_release_notes_notice(_current_version())
@@ -436,6 +446,7 @@ async def run_openai_tui(
         extension_paths=extension_paths,
         extensions_enabled=extensions_enabled,
         project_extensions_enabled=project_extensions_enabled,
+        temperature=temperature,
     )
 
 
@@ -655,6 +666,7 @@ async def run_openai_print_mode(
     extension_paths: tuple[Path, ...] = (),
     extensions_enabled: bool = True,
     project_extensions_enabled: bool = False,
+    temperature: float | None = None,
 ) -> bool:
     """Run print mode with the OpenAI-compatible provider configured from the environment."""
     settings = load_provider_settings()
@@ -663,10 +675,16 @@ async def run_openai_print_mode(
     provider = create_model_provider(
         selection.provider,
         model=selection.model,
+        temperature=temperature,
         thinking_level=resolve_startup_thinking_level(selection.provider, selection.model),
     )
     manager = session_manager or SessionManager()
-    record = manager.create_session(cwd=cwd, model=selection.model)
+    record = manager.create_session(
+        cwd=cwd,
+        model=selection.model,
+        provider_name=selection.provider.name,
+        temperature=temperature,
+    )
     try:
         return await run_print_mode(
             prompt=prompt,
@@ -680,6 +698,7 @@ async def run_openai_print_mode(
             provider_name=selection.provider.name,
             provider_settings=settings,
             runtime_provider_config=selection.provider,
+            temperature=temperature,
             shell_command_prefix=shell_settings.shell_command_prefix,
             extension_paths=extension_paths,
             extensions_enabled=extensions_enabled,
@@ -703,6 +722,7 @@ async def run_print_mode(
     provider_name: str = DEFAULT_PROVIDER_NAME,
     provider_settings: ProviderSettings | None = None,
     runtime_provider_config: ProviderConfig | None = None,
+    temperature: float | None = None,
     shell_command_prefix: str | None = None,
     extension_paths: tuple[Path, ...] = (),
     extensions_enabled: bool = True,
@@ -725,6 +745,7 @@ async def run_print_mode(
             provider_name=provider_name,
             provider_settings=provider_settings,
             runtime_provider_config=runtime_provider_config,
+            temperature=temperature,
             shell_command_prefix=shell_command_prefix,
             extension_paths=extension_paths,
             extensions_enabled=extensions_enabled,

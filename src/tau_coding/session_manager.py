@@ -12,6 +12,13 @@ from pydantic import BaseModel, ConfigDict
 from tau_coding.paths import TauPaths
 
 
+class _UnsetTemperature:
+    """Distinguish an omitted metadata update from resetting to provider default."""
+
+
+_UNSET_TEMPERATURE = _UnsetTemperature()
+
+
 class SessionRecordModel(BaseModel):
     """JSON-serializable coding-session metadata."""
 
@@ -22,6 +29,7 @@ class SessionRecordModel(BaseModel):
     cwd: str
     model: str
     provider_name: str | None = None
+    temperature: float | None = None
     title: str | None = None
     created_at: float
     updated_at: float
@@ -39,6 +47,7 @@ class CodingSessionRecord:
     created_at: float
     updated_at: float
     provider_name: str | None = None
+    temperature: float | None = None
 
     @classmethod
     def from_model(cls, model: SessionRecordModel) -> CodingSessionRecord:
@@ -52,6 +61,7 @@ class CodingSessionRecord:
             created_at=model.created_at,
             updated_at=model.updated_at,
             provider_name=model.provider_name,
+            temperature=model.temperature,
         )
 
     def to_model(self) -> SessionRecordModel:
@@ -65,6 +75,7 @@ class CodingSessionRecord:
             created_at=self.created_at,
             updated_at=self.updated_at,
             provider_name=self.provider_name,
+            temperature=self.temperature,
         )
 
 
@@ -113,6 +124,7 @@ class SessionManager:
         provider_name: str | None = None,
         title: str | None = None,
         session_id: str | None = None,
+        temperature: float | None = None,
     ) -> CodingSessionRecord:
         """Create and index a new session record."""
         record = self.prepare_session(
@@ -121,6 +133,7 @@ class SessionManager:
             provider_name=provider_name,
             title=title,
             session_id=session_id,
+            temperature=temperature,
         )
         self.index_session(record)
         return record
@@ -133,6 +146,7 @@ class SessionManager:
         provider_name: str | None = None,
         title: str | None = None,
         session_id: str | None = None,
+        temperature: float | None = None,
     ) -> CodingSessionRecord:
         """Return metadata for a session without adding it to the resume index."""
         now = time()
@@ -149,6 +163,7 @@ class SessionManager:
             title=title,
             created_at=now,
             updated_at=now,
+            temperature=temperature,
         )
 
     def index_session(self, record: CodingSessionRecord) -> CodingSessionRecord:
@@ -157,7 +172,12 @@ class SessionManager:
         return record
 
     def get_or_create_default_session(
-        self, *, cwd: Path, model: str, provider_name: str | None = None
+        self,
+        *,
+        cwd: Path,
+        model: str,
+        provider_name: str | None = None,
+        temperature: float | None = None,
     ) -> CodingSessionRecord:
         """Return the default project session, creating an index record when needed."""
         resolved_cwd = cwd.resolve()
@@ -178,6 +198,7 @@ class SessionManager:
             title="Default session",
             created_at=now,
             updated_at=now,
+            temperature=temperature,
         )
         self._upsert(record)
         return record
@@ -189,6 +210,7 @@ class SessionManager:
         model: str | None = None,
         provider_name: str | None = None,
         title: str | None = None,
+        temperature: float | None | _UnsetTemperature = _UNSET_TEMPERATURE,
     ) -> CodingSessionRecord | None:
         """Update a session's last-used metadata."""
         existing = self.get_session(session_id)
@@ -203,6 +225,9 @@ class SessionManager:
             title=title if title is not None else existing.title,
             created_at=existing.created_at,
             updated_at=time(),
+            temperature=(
+                existing.temperature if isinstance(temperature, _UnsetTemperature) else temperature
+            ),
         )
         self._upsert(updated)
         return updated

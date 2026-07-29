@@ -1551,6 +1551,37 @@ kbd {
   line-height: 1.5;
 }
 
+.advanced-settings {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+}
+
+.advanced-settings > summary {
+  padding: 11px 13px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.advanced-settings[open] > summary {
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.advanced-settings-body {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+}
+
+.advanced-settings-body > small {
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .form-error {
   margin: -3px 0 0;
   padding: 9px 11px;
