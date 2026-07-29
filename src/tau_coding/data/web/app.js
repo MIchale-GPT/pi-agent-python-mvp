@@ -11,8 +11,13 @@ const state = {
   configuration: null,
   queue: { steering: [], followUp: [] },
   pendingToolAuthorization: null,
+  settledRunIds: new Set(),
 };
-const { createAndEnterSession, resolveTemperature } = globalThis.TauSessionActions;
+const {
+  createAndEnterSession,
+  resolveTemperature,
+  shouldActivateAcceptedRun,
+} = globalThis.TauSessionActions;
 
 const shell = document.querySelector(".shell");
 const sessionList = document.querySelector("#session-list");
@@ -168,7 +173,8 @@ function activeSession() {
 
 function setSessionActions() {
   const session = activeSession();
-  sessionSettingsButton.disabled = !session || state.running;
+  sessionSettingsButton.disabled =
+    !session || !state.configuration || state.running;
   renameSessionButton.disabled = !session;
   deleteSessionButton.disabled = !session;
   [
@@ -473,7 +479,8 @@ function setComposerState() {
   steerButton.disabled = !ready || !promptInput.value.trim();
   followUpButton.disabled = !ready || !promptInput.value.trim();
   cancelButton.hidden = !state.running;
-  sessionSettingsButton.disabled = !hasSession || state.running;
+  sessionSettingsButton.disabled =
+    !hasSession || !state.configuration || state.running;
   if (!hasSession) {
     promptInput.placeholder = "选择一个会话后发送任务…";
     composerState.textContent = "未选择会话";
@@ -585,8 +592,8 @@ function updateConfiguration(configuration) {
   }
 }
 
-function showToolAuthorization(event) {
-  state.pendingToolAuthorization = event;
+function showToolAuthorization(event, sessionId) {
+  state.pendingToolAuthorization = { ...event, sessionId };
   toolAuthorizationName.textContent = event.toolName;
   toolAuthorizationArguments.textContent = JSON.stringify(event.arguments || {}, null, 2);
   setFormError("#tool-authorization-error");
@@ -632,7 +639,7 @@ async function handleLiveEvent(event, sessionId) {
     updateConfiguration(event);
     addTraceEvent("configuration_updated", `${event.providerName} · ${event.model}`);
   } else if (event.type === "tool_authorization_requested") {
-    showToolAuthorization(event);
+    showToolAuthorization(event, sessionId);
   } else if (event.type === "command_result") {
     appendCommandResult(event.command, event.message);
     addTraceEvent("command_result", event.command);
@@ -657,6 +664,10 @@ async function handleLiveEvent(event, sessionId) {
   } else if (event.type === "agent_settled") {
     addTraceEvent("agent_settled", "transcript persisted");
   } else if (event.type === "run_finished") {
+    state.settledRunIds.add(event.runId);
+    if (state.settledRunIds.size > 32) {
+      state.settledRunIds.delete(state.settledRunIds.values().next().value);
+    }
     state.running = false;
     state.submitting = true;
     state.activeRunId = null;
@@ -677,6 +688,10 @@ async function handleLiveEvent(event, sessionId) {
 }
 
 function connectEventStream(sessionId) {
+  if (state.pendingToolAuthorization) {
+    state.pendingToolAuthorization = null;
+    toolAuthorizationDialog.close();
+  }
   state.eventSource?.close();
   state.eventSource = null;
   state.eventStreamConnected = false;
@@ -713,6 +728,7 @@ async function loadSession(sessionId, options = {}) {
   const session = state.sessions.find((item) => item.id === sessionId);
   if (!session) return;
   state.activeSessionId = sessionId;
+  state.configuration = null;
   if (reconnect) connectEventStream(sessionId);
   renderSessionList();
   setSessionActions();
@@ -734,6 +750,7 @@ async function loadSession(sessionId, options = {}) {
     const index = state.sessions.findIndex((item) => item.id === sessionId);
     if (index >= 0) state.sessions[index] = payload.session;
     setSessionFacts(payload.session, payload.messages.length, payload.configuration);
+    setSessionActions();
     markBranchLoaded(payload.messages.length);
     renderSessionList();
     if (scrollToBottom) {
@@ -870,7 +887,7 @@ function populateSessionThinking(selectedLevel) {
   if (levels.includes(selectedLevel)) sessionThinking.value = selectedLevel;
   sessionThinkingHelp.textContent = levels.length
     ? `可用强度：${levels.join("、")}`
-    : state.configuration?.thinkingUnavailableReason || "当前模型不支持 thinking。";
+    : "当前选择的 Provider/模型不支持 thinking。";
 }
 
 function populateSessionModels(selectedModel, selectedThinking) {
@@ -1226,7 +1243,10 @@ async function submitComposerMessage(requestedBehavior = null) {
       appendCommandResult(payload.command, payload.message);
       addTraceEvent("command_result", payload.command);
     } else if (payload.status === "accepted") {
-      state.running = true;
+      if (shouldActivateAcceptedRun(payload.runId, state.settledRunIds)) {
+        state.running = true;
+        state.activeRunId = payload.runId;
+      }
     }
   } catch (error) {
     showToast(`任务发送失败：${error.message}`);
@@ -1282,7 +1302,7 @@ toolAuthorizationDialog
   .forEach((button) => {
     button.addEventListener("click", async () => {
       const pending = state.pendingToolAuthorization;
-      const sessionId = state.activeSessionId;
+      const sessionId = pending?.sessionId;
       if (!pending || !sessionId) return;
       toolAuthorizationDialog
         .querySelectorAll("[data-tool-decision]")

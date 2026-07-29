@@ -431,6 +431,34 @@ console.log(JSON.stringify({ result, invalid }));
     }
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_browser_ignores_an_accepted_run_response_after_sse_already_finished() -> None:
+    controller_path = Path(web_module.__file__).parent / "data" / "web" / "session-actions.js"
+    script = """
+require(process.argv[1]);
+const shouldActivate = globalThis.TauSessionActions.shouldActivateAcceptedRun;
+const settled = new Set(["fast-run"]);
+console.log(JSON.stringify({
+  fastRun: shouldActivate("fast-run", settled),
+  normalRun: shouldActivate("normal-run", settled),
+  remaining: [...settled],
+}));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", script, str(controller_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "fastRun": False,
+        "normalRun": True,
+        "remaining": [],
+    }
+
+
 @pytest.mark.parametrize(
     ("model_api", "expected_temperature"),
     [(None, 0.2), ("openai-responses", None)],

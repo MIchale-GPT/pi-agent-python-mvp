@@ -31,8 +31,15 @@
     return session;
   }
 
+  function shouldActivateAcceptedRun(runId, settledRunIds) {
+    if (!settledRunIds.has(runId)) return true;
+    settledRunIds.delete(runId);
+    return false;
+  }
+
   global.TauSessionActions = Object.freeze({
     createAndEnterSession,
     resolveTemperature,
+    shouldActivateAcceptedRun,
   });
 })(globalThis);

@@ -515,20 +515,7 @@ class TauWebRuntime:
         finally:
             if slot.cancel_requested and status == "completed":
                 status = "cancelled"
-            self._publish(
-                slot,
-                {
-                    "type": "run_finished",
-                    "sessionId": session_id,
-                    "runId": run_id,
-                    "status": status,
-                },
-            )
-            slot.run_task = None
-            slot.run_id = None
-            slot.run_kind = None
-            slot.cancel_requested = False
-            self._publish_queue_update(slot, only_if_changed=True)
+            self._finish_run(session_id, slot, run_id, status)
 
     async def _run_compaction(
         self,
@@ -565,19 +552,29 @@ class TauWebRuntime:
                 },
             )
         finally:
-            self._publish(
-                slot,
-                {
-                    "type": "run_finished",
-                    "sessionId": session_id,
-                    "runId": run_id,
-                    "status": status,
-                },
-            )
-            slot.run_task = None
-            slot.run_id = None
-            slot.run_kind = None
-            slot.cancel_requested = False
+            self._finish_run(session_id, slot, run_id, status)
+
+    def _finish_run(
+        self,
+        session_id: str,
+        slot: _WebSessionSlot,
+        run_id: str,
+        status: RunStatus,
+    ) -> None:
+        self._publish(
+            slot,
+            {
+                "type": "run_finished",
+                "sessionId": session_id,
+                "runId": run_id,
+                "status": status,
+            },
+        )
+        slot.run_task = None
+        slot.run_id = None
+        slot.run_kind = None
+        slot.cancel_requested = False
+        self._publish_queue_update(slot, only_if_changed=True)
 
     async def _cancel(self, session_id: str) -> bool:
         self._require_session(session_id)

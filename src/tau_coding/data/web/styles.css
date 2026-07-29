@@ -1296,6 +1296,10 @@ kbd {
     transform 0.18s ease;
 }
 
+.send-button[hidden] {
+  display: none;
+}
+
 .send-button:not(:disabled):hover {
   transform: translateY(-1px);
 }
