@@ -66,6 +66,15 @@ uv run ruff format --check .
 uv run mypy
 ```
 
+Web frontend assets have their own checks (requires Node 22+):
+
+```bash
+node --check src/tau_coding/data/web/app.js
+node --check src/tau_coding/data/web/session-actions.js
+node --check src/tau_coding/data/web/trace-timeline.js
+node --test "tests/web/**/*.test.mjs"
+```
+
 For the documentation site (a [Hugo](https://gohugo.io/) project):
 
 ```bash

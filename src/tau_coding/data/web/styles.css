@@ -1451,6 +1451,145 @@ kbd {
   font-size: 7px;
 }
 
+.run-timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-group {
+  margin-bottom: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  overflow: hidden;
+}
+
+.run-head {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+}
+
+.run-dot.is-running {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.run-dot.is-completed {
+  border-color: var(--success);
+}
+
+.run-dot.is-cancelled,
+.run-dot.is-failed {
+  border-color: var(--danger, #e5534b);
+}
+
+.run-head-text strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.run-meta {
+  display: block;
+  color: var(--dim);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.run-items {
+  margin: 0;
+  padding: 2px 10px 8px;
+  list-style: none;
+  border-top: 1px solid var(--border-strong);
+}
+
+.run-item {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: start;
+  padding: 5px 0;
+}
+
+.run-item-body strong {
+  display: block;
+  font-size: 9px;
+}
+
+.run-item-body p {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.run-item.kind-user .run-item-body p {
+  font-weight: 600;
+}
+
+.run-item.kind-error .run-item-body strong {
+  color: var(--danger, #e5534b);
+}
+
+.tool-details summary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tool-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-details summary strong {
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.tool-details summary small {
+  color: var(--dim);
+  font-size: 9px;
+}
+
+.tool-detail-body pre {
+  max-height: 180px;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 80%, black);
+  overflow: auto;
+  font-size: 10px;
+}
+
+.tool-detail-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.trace-copy-button {
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.trace-copy-button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .architecture-card,
 .session-facts {
   margin-top: 18px;

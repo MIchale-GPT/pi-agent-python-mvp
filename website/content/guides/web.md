@@ -93,7 +93,8 @@ The live workspace:
   distinct treatments;
 - saved thinking and tool calls can be inspected;
 - after a run, the transcript reloads the durable active branch;
-- the trace panel shows live run and tool events;
+- the trace panel groups the live event stream into per-run timelines (see
+  below);
 - dark and light themes are available.
 
 Select a session, wait until the composer says **Session ready**, type a task,
@@ -119,6 +120,27 @@ in the TUI or a second Tau process. Closing the tab does not cancel ordinary
 agent work; it only disconnects that browser's event subscriber. Returning to
 the page reconnects the event stream and the durable transcript is refreshed
 when the run settles.
+
+## Read the per-run trace timeline
+
+The trace panel groups every event by run — one group per prompt you submit.
+Each group shows the prompt excerpt, the run status (running, completed,
+cancelled, failed), the number of turns, and the elapsed time.
+
+Inside a group:
+
+- your prompt and each assistant reply appear as boundary entries; streaming
+  text stays in the transcript panel;
+- every tool call is one collapsible entry showing the tool name, its
+  authorization state, the full arguments, and the raw result;
+- failed runs show the provider error inline;
+- each entry offers copy buttons for the formatted arguments and for the raw
+  JSON event payload as delivered over SSE.
+
+If the browser reconnects while a run is still active, the server sends a
+`run_summary` event so the panel can restore counts and status without
+replaying history. The durable record of the conversation remains the session
+JSONL file; the timeline is a live view of the current process.
 
 ## Authorize tool calls
 

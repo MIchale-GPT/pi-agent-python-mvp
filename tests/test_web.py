@@ -1537,6 +1537,156 @@ def test_message_api_streams_coding_session_events_and_persists_turn(tmp_path: P
         thread.join(timeout=2)
 
 
+def test_message_api_tags_trace_events_with_run_id_and_finish_summary(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Trace session",
+        session_id="session-1",
+    )
+    provider = _StreamingFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    events_connection = HTTPConnection(host, port, timeout=2)
+    command_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        events_connection.request("GET", "/api/sessions/session-1/events")
+        events_response = events_connection.getresponse()
+        assert events_response.status == 200
+
+        request_body = json.dumps({"message": "Connect the A theme"})
+        command_connection.request(
+            "POST",
+            "/api/sessions/session-1/messages",
+            body=request_body,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(len(request_body)),
+                "X-Tau-Web": "1",
+            },
+        )
+        command_response = command_connection.getresponse()
+        command_payload = json.loads(command_response.read())
+        assert command_payload["status"] == "accepted"
+        run_id = command_payload["runId"]
+
+        events = _read_sse_events(events_response, until="run_finished")
+
+        streamed_types = {"message_start", "message_update", "message_end", "agent_settled"}
+        for event in events:
+            if event["type"] in streamed_types:
+                assert event["runId"] == run_id, event
+                assert isinstance(event["timestamp"], int), event
+
+        finished = events[-1]
+        assert finished["type"] == "run_finished"
+        assert finished["status"] == "completed"
+        assert finished["turnCount"] == 1
+        assert finished["eventCount"] >= 4
+        assert isinstance(finished["durationMs"], int)
+        assert finished["durationMs"] >= 0
+    finally:
+        events_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_sse_reconnect_mid_run_receives_active_run_summary(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Summary session",
+        session_id="session-1",
+    )
+    provider = _DisconnectFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    first_connection = HTTPConnection(host, port, timeout=2)
+    second_connection = HTTPConnection(host, port, timeout=2)
+    command_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        first_connection.request("GET", "/api/sessions/session-1/events")
+        first_response = first_connection.getresponse()
+        assert first_response.status == 200
+
+        status, payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Slow run"},
+        )
+        assert status == 202
+        run_id = payload["runId"]
+        assert provider.started.wait(timeout=1)
+
+        second_connection.request("GET", "/api/sessions/session-1/events")
+        second_response = second_connection.getresponse()
+        assert second_response.status == 200
+
+        events = _read_sse_events(second_response, until="run_summary")
+        summary = events[-1]
+        assert [event["type"] for event in events] == ["web_connected", "run_summary"]
+        assert events[0]["running"] is True
+        assert summary["sessionId"] == "session-1"
+        assert summary["runId"] == run_id
+        assert summary["status"] == "running"
+        assert isinstance(summary["eventCount"], int)
+        assert summary["eventCount"] >= 1
+        assert summary["turnCount"] == 0
+        assert isinstance(summary["elapsedMs"], int)
+
+        provider.release.set()
+        _read_sse_events(second_response, until="run_finished")
+        finished = _read_sse_events(first_response, until="run_finished")[-1]
+        assert finished["type"] == "run_finished"
+    finally:
+        first_connection.close()
+        second_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_message_api_dispatches_help_without_calling_the_provider(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     cwd = tmp_path / "project"
@@ -1934,6 +2084,107 @@ def test_tool_authorization_supports_allow_deny_and_cancel(
         completed = _read_sse_events(events_response, until="run_finished")
         assert completed[-1]["status"] == expected_status
         assert executed.is_set() is should_execute
+    finally:
+        events_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_tool_trace_events_pair_authorization_with_execution(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Pairing session",
+        session_id="session-1",
+    )
+    provider = _ToolCallingFakeProvider()
+
+    async def execute(
+        tool_call_id: str,
+        arguments: Mapping[str, object],
+        signal: CancellationToken | None = None,
+        on_update: object = None,
+    ) -> AgentToolResult:
+        del tool_call_id, arguments, signal, on_update
+        return AgentToolResult(content="tool completed")
+
+    tool = AgentTool(
+        name="write_file",
+        label="Write file",
+        description="Write a project file.",
+        parameters={"type": "object"},
+        execute_fn=execute,
+    )
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider, tools=[tool])
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    events_connection = HTTPConnection(host, port, timeout=2)
+    command_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        events_connection.request("GET", "/api/sessions/session-1/events")
+        events_response = events_connection.getresponse()
+        assert events_response.status == 200
+        status, payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Use the write tool"},
+        )
+        assert status == 202
+        run_id = payload["runId"]
+
+        pre_auth = _read_sse_events(
+            events_response,
+            until="tool_authorization_requested",
+        )
+        # Tau yields tool_execution_start before invoking the authorization hook.
+        start = next(e for e in pre_auth if e["type"] == "tool_execution_start")
+        request = pre_auth[-1]
+        assert request["type"] == "tool_authorization_requested"
+        assert request["runId"] == run_id
+        assert isinstance(request["timestamp"], int)
+        assert request["toolCallId"] == "call-1"
+
+        status, resolved = _post_json(
+            command_connection,
+            "/api/sessions/session-1/tool-authorizations/" + request["requestId"],
+            {"decision": "allow"},
+        )
+        assert status == 200
+        assert resolved["decision"] == "allow"
+
+        events = _read_sse_events(events_response, until="run_finished")
+        end = next(e for e in events if e["type"] == "tool_execution_end")
+        end = next(e for e in events if e["type"] == "tool_execution_end")
+        assert start["runId"] == run_id
+        assert start["toolCallId"] == request["toolCallId"]
+        assert start["args"] == {"path": "notes.md"}
+        assert end["runId"] == run_id
+        assert end["isError"] is False
+        assert end["result"]["content"][0]["text"] == "tool completed"
+
+        finished = events[-1]
+        assert finished["type"] == "run_finished"
+        assert finished["turnCount"] == 2
     finally:
         events_connection.close()
         command_connection.close()

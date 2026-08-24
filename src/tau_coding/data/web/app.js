@@ -12,6 +12,10 @@ const state = {
   queue: { steering: [], followUp: [] },
   pendingToolAuthorization: null,
   settledRunIds: new Set(),
+  traceEvents: [],
+  traceAuthorizationDecisions: {},
+  traceExpandAll: false,
+  traceOpenToolIds: new Set(),
 };
 const {
   configureAndCreateSession,
@@ -540,6 +544,168 @@ function addTraceEvent(type, detail = "") {
   document.querySelector("#trace-state").textContent = type;
 }
 
+const TRACE_EVENT_BUFFER_LIMIT = 600;
+const RUN_STATUS_LABELS = {
+  running: "运行中",
+  completed: "已完成",
+  cancelled: "已取消",
+  failed: "失败",
+};
+const TOOL_STATE_LABELS = {
+  running: "运行中…",
+  done: "完成",
+  denied: "已拒绝（未执行）",
+  cancelled: "已取消",
+};
+const AUTHORIZATION_STATUS_LABELS = {
+  requested: "待确认",
+  allowed: "已授权",
+  denied: "已拒绝",
+  cancelled: "已取消",
+};
+
+function formatTraceDuration(ms) {
+  if (typeof ms !== "number") return "";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
+
+async function copyTraceText(label, text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(`${label}已复制`);
+  } catch (error) {
+    showToast(`复制失败：${error.message}`);
+  }
+}
+
+function copyButton(label, getText) {
+  const button = element("button", "trace-copy-button", label);
+  button.addEventListener("click", () => {
+    void copyTraceText(label, getText());
+  });
+  return button;
+}
+
+function toolStateLabel(item) {
+  if (item.state === "denied" || item.state === "cancelled") {
+    return TOOL_STATE_LABELS[item.state];
+  }
+  if (item.authorization?.status === "requested" && item.state === "running") {
+    return AUTHORIZATION_STATUS_LABELS.requested;
+  }
+  return TOOL_STATE_LABELS[item.state] ?? item.state;
+}
+
+function renderRunTimeline() {
+  const container = document.querySelector("#run-timeline");
+  if (!container || typeof window.TraceTimeline !== "object") return;
+  const { runs } = window.TraceTimeline.buildTraceTimeline(state.traceEvents, {
+    maxRuns: 6,
+    authorizationDecisions: state.traceAuthorizationDecisions,
+  });
+
+  container.replaceChildren();
+  for (const run of runs.slice().reverse()) {
+    const statusLabel = RUN_STATUS_LABELS[run.status] ?? run.status;
+    const metaParts = [statusLabel];
+    if (typeof run.turnCount === "number" && run.turnCount > 0) {
+      metaParts.push(`${run.turnCount} 轮`);
+    }
+    const duration = run.durationMs ?? run.elapsedMs;
+    const durationText = formatTraceDuration(duration);
+    if (durationText) metaParts.push(durationText);
+
+    const head = element("div", "run-head");
+    const title = element("strong", null, run.title);
+    title.title = run.title;
+    head.append(
+      element("span", `event-node run-dot is-${run.status}`),
+      element("div", "run-head-text", title),
+      element("small", "run-meta", metaParts.join(" · ")),
+    );
+
+    const items = element("ul", "run-items");
+    for (const item of run.items) {
+      items.append(renderRunItem(item));
+    }
+    const group = element("li", `run-group is-${run.status}`);
+    group.append(head);
+    if (run.items.length > 0) group.append(items);
+    container.append(group);
+  }
+}
+
+function renderRunItem(item) {
+  const row = element("li", `run-item kind-${item.kind}`);
+  row.append(element("span", "event-node"));
+  if (item.kind === "user") {
+    const text = element("div", "run-item-body");
+    text.append(element("strong", null, "用户"), element("p", null, item.text));
+    row.append(text);
+  } else if (item.kind === "assistant") {
+    const text = element("div", "run-item-body");
+    text.append(element("strong", null, "助手回答"), element("p", null, item.text));
+    row.append(text);
+  } else if (item.kind === "error") {
+    const body = element("div", "run-item-body");
+    body.append(element("strong", null, "错误"), element("p", null, item.message));
+    row.append(body);
+    row.classList.add("is-error");
+  } else if (item.kind === "tool") {
+    row.classList.add(item.state === "done" ? "is-done" : "is-live");
+    if (item.isError) row.classList.add("is-error");
+    const summaryLine = element("summary");
+    summaryLine.append(
+      element("strong", null, `⚙ ${item.toolName}`),
+      element("small", null, toolStateLabel(item)),
+    );
+    const detailsNode = element("details", "tool-details");
+    detailsNode.open =
+      state.traceExpandAll || state.traceOpenToolIds.has(item.toolCallId);
+    detailsNode.addEventListener("toggle", () => {
+      if (state.traceExpandAll) return;
+      if (detailsNode.open) {
+        state.traceOpenToolIds.add(item.toolCallId);
+      } else {
+        state.traceOpenToolIds.delete(item.toolCallId);
+      }
+    });
+    detailsNode.append(summaryLine);
+    const body = element("div", "tool-detail-body");
+    const argsJson = JSON.stringify(item.args ?? {}, null, 2);
+    body.append(element("pre", null, argsJson));
+    if (item.resultText !== null && item.resultText !== undefined && item.resultText !== "") {
+      body.append(element("pre", null, item.resultText));
+    }
+    const actions = element("div", "tool-detail-actions");
+    actions.append(copyButton("复制参数", () => argsJson));
+    if (item.rawJson) {
+      actions.append(copyButton("复制原始事件", () => item.rawJson));
+    }
+    body.append(actions);
+    detailsNode.append(body);
+    row.append(detailsNode);
+  } else {
+    const body = element("div", "run-item-body");
+    body.append(
+      element("strong", null, item.type),
+      element("p", null, item.detail || ""),
+    );
+    row.append(body);
+  }
+  if (item.rawJson && item.kind !== "tool") {
+    row.append(copyButton("复制", () => item.rawJson));
+  }
+  return row;
+}
+
+function recordTraceEvent(event) {
+  state.traceEvents.push(event);
+  if (state.traceEvents.length > TRACE_EVENT_BUFFER_LIMIT) {
+    state.traceEvents.splice(0, state.traceEvents.length - TRACE_EVENT_BUFFER_LIMIT);
+  }
+}
+
 function scrollTranscriptToBottom() {
   transcript.scrollTop = transcript.scrollHeight;
 }
@@ -611,6 +777,11 @@ function showToolAuthorization(event, sessionId) {
 
 async function handleLiveEvent(event, sessionId) {
   if (sessionId !== state.activeSessionId) return;
+  recordTraceEvent(event);
+  const shouldRerenderTimeline = event.type !== "message_update";
+  if (shouldRerenderTimeline) {
+    renderRunTimeline();
+  }
   if (event.type === "web_connected") {
     const missedFinish = state.running && !event.running;
     state.eventStreamConnected = true;
@@ -704,7 +875,11 @@ function connectEventStream(sessionId) {
   state.activeRunId = null;
   state.liveMessage = null;
   state.queue = { steering: [], followUp: [] };
+  state.traceEvents = [];
+  state.traceAuthorizationDecisions = {};
+  state.traceOpenToolIds = new Set();
   setComposerState();
+  renderRunTimeline();
 
   const source = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
   state.eventSource = source;
@@ -1364,6 +1539,10 @@ toolAuthorizationDialog
           `/api/sessions/${encodeURIComponent(sessionId)}/tool-authorizations/${encodeURIComponent(pending.requestId)}`,
           { decision: button.dataset.toolDecision },
         );
+        const decisionLabels = { allow: "allowed", deny: "denied", cancel: "cancelled" };
+        state.traceAuthorizationDecisions[pending.requestId] =
+          decisionLabels[button.dataset.toolDecision] ?? button.dataset.toolDecision;
+        renderRunTimeline();
         state.pendingToolAuthorization = null;
         toolAuthorizationDialog.close();
       } catch (error) {
@@ -1376,6 +1555,13 @@ toolAuthorizationDialog
   });
 toolAuthorizationDialog.addEventListener("cancel", (event) => {
   event.preventDefault();
+});
+
+document.querySelector("#trace-expand-all").addEventListener("click", () => {
+  state.traceExpandAll = !state.traceExpandAll;
+  const button = document.querySelector("#trace-expand-all");
+  button.textContent = state.traceExpandAll ? "收起全部" : "展开全部";
+  renderRunTimeline();
 });
 
 shell.dataset.theme = window.localStorage.getItem("tau-web-theme") || "dark";

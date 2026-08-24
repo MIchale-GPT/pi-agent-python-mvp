@@ -47,6 +47,27 @@ jobs:
       - name: Run mypy
         run: uv run mypy
 
+  web-assets:
+    name: Web asset checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Check web scripts parse
+        run: |
+          node --check src/tau_coding/data/web/app.js
+          node --check src/tau_coding/data/web/session-actions.js
+          node --check src/tau_coding/data/web/trace-timeline.js
+
+      - name: Run trace timeline tests
+        run: node --test "tests/web/**/*.test.mjs"
+
   docs:
     name: Documentation build
     runs-on: ubuntu-latest

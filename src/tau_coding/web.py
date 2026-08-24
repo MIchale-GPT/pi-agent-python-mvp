@@ -21,8 +21,14 @@ from typing import Any, Literal, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import uuid4
 
-from tau_agent.events import MessageEndEvent, MessageStartEvent
-from tau_agent.messages import AssistantMessage, ToolCall, ToolResultMessage, message_text
+from tau_agent.events import MessageEndEvent, MessageStartEvent, TurnEndEvent
+from tau_agent.messages import (
+    AssistantMessage,
+    ToolCall,
+    ToolResultMessage,
+    current_timestamp_ms,
+    message_text,
+)
 from tau_agent.session import (
     BranchSummaryEntry,
     CompactionEntry,
@@ -93,6 +99,7 @@ _WEB_IMMEDIATE_COMMANDS = frozenset(
 _ASSET_CONTENT_TYPES = {
     "index.html": "text/html; charset=utf-8",
     "styles.css": "text/css; charset=utf-8",
+    "trace-timeline.js": "text/javascript; charset=utf-8",
     "session-actions.js": "text/javascript; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
     "favicon.svg": "image/svg+xml",
@@ -164,6 +171,9 @@ class _WebSessionSlot:
     next_sequence: int = 1
     last_queue_state: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
     pending_tool_authorizations: dict[str, _PendingToolAuthorization] = field(default_factory=dict)
+    run_started_ms: int | None = None
+    trace_event_count: int = 0
+    trace_turn_count: int = 0
 
 
 class WebSessionBusyError(RuntimeError):
@@ -372,6 +382,19 @@ class TauWebRuntime:
                 },
             )
         )
+        if slot.run_task is not None and not slot.run_task.done() and slot.run_id is not None:
+            subscriber.put(
+                self._stream_item(
+                    slot,
+                    {
+                        "type": "run_summary",
+                        "sessionId": session_id,
+                        "runId": slot.run_id,
+                        "status": "running",
+                        **_run_trace_snapshot(slot),
+                    },
+                )
+            )
         if slot.handle is not None:
             subscriber.put(
                 self._stream_item(
@@ -385,7 +408,7 @@ class TauWebRuntime:
             subscriber.put(
                 self._stream_item(
                     slot,
-                    _tool_authorization_event_payload(pending),
+                    _trace_payload(slot, _tool_authorization_event_payload(pending)),
                 )
             )
         return subscriber_id, subscriber
@@ -440,6 +463,9 @@ class TauWebRuntime:
         run_id = uuid4().hex
         slot.run_id = run_id
         slot.cancel_requested = False
+        slot.run_started_ms = current_timestamp_ms()
+        slot.trace_event_count = 0
+        slot.trace_turn_count = 0
         self._publish(
             slot,
             {
@@ -500,7 +526,13 @@ class TauWebRuntime:
         status: RunStatus = "completed"
         try:
             async for event in slot.handle.session.prompt(message):
-                self._publish(slot, _coding_event_payload(event))
+                payload = _coding_event_payload(event)
+                payload["runId"] = run_id
+                payload["timestamp"] = current_timestamp_ms()
+                self._publish(slot, payload)
+                slot.trace_event_count += 1
+                if isinstance(event, TurnEndEvent):
+                    slot.trace_turn_count += 1
                 if isinstance(event, MessageStartEvent):
                     self._publish_queue_update(slot, only_if_changed=True)
                 if (
@@ -585,6 +617,7 @@ class TauWebRuntime:
         run_id: str,
         status: RunStatus,
     ) -> None:
+        snapshot = _run_trace_snapshot(slot)
         self._publish(
             slot,
             {
@@ -592,12 +625,19 @@ class TauWebRuntime:
                 "sessionId": session_id,
                 "runId": run_id,
                 "status": status,
+                "timestamp": current_timestamp_ms(),
+                "turnCount": snapshot["turnCount"],
+                "eventCount": snapshot["eventCount"],
+                "durationMs": snapshot["elapsedMs"],
             },
         )
         slot.run_task = None
         slot.run_id = None
         slot.run_kind = None
         slot.cancel_requested = False
+        slot.run_started_ms = None
+        slot.trace_event_count = 0
+        slot.trace_turn_count = 0
         self._publish_queue_update(slot, only_if_changed=True)
 
     async def _cancel(self, session_id: str) -> bool:
@@ -647,7 +687,7 @@ class TauWebRuntime:
             decision=self._loop.create_future(),
         )
         slot.pending_tool_authorizations[request_id] = pending
-        self._publish(slot, _tool_authorization_event_payload(pending))
+        self._publish(slot, _trace_payload(slot, _tool_authorization_event_payload(pending)))
         try:
             decision = await asyncio.wait_for(
                 pending.decision,
@@ -956,7 +996,7 @@ class TauWebRuntime:
         if only_if_changed and state == slot.last_queue_state:
             return
         slot.last_queue_state = state
-        self._publish(slot, _queue_event_payload(slot.handle.session))
+        self._publish(slot, _trace_payload(slot, _queue_event_payload(slot.handle.session)))
 
     def _stream_item(self, slot: _WebSessionSlot, payload: dict[str, object]) -> _StreamItem:
         item = _StreamItem(sequence=slot.next_sequence, payload=payload)
@@ -2157,6 +2197,25 @@ async def _load_web_session(
     if temperature != record.temperature:
         manager.touch_session(record.id, temperature=temperature)
     return WebSessionHandle(session=session, provider=provider)
+
+
+def _run_trace_snapshot(slot: _WebSessionSlot) -> dict[str, object]:
+    """Event/turn counts and elapsed time for the slot's active run."""
+    now_ms = current_timestamp_ms()
+    started_ms = slot.run_started_ms
+    return {
+        "eventCount": slot.trace_event_count,
+        "turnCount": slot.trace_turn_count,
+        "elapsedMs": max(0, now_ms - started_ms) if started_ms is not None else 0,
+    }
+
+
+def _trace_payload(slot: _WebSessionSlot, payload: dict[str, object]) -> dict[str, object]:
+    """Stamp the active run id and a timestamp onto a trace-worthy payload."""
+    if slot.run_id is not None:
+        payload.setdefault("runId", slot.run_id)
+        payload.setdefault("timestamp", current_timestamp_ms())
+    return payload
 
 
 def _coding_event_payload(event: CodingSessionEvent) -> dict[str, object]:

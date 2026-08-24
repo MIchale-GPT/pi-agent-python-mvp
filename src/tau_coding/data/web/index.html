@@ -238,8 +238,10 @@
         <div class="inspector-body">
           <div class="trace-summary">
             <span id="trace-state">server_ready</span>
-            <strong id="trace-duration">local</strong>
+            <button type="button" id="trace-expand-all" class="trace-copy-button" aria-label="切换展开全部工具详情">展开全部</button>
           </div>
+
+          <ol class="run-timeline" id="run-timeline" aria-label="按提问分组的运行轨迹"></ol>
 
           <ol class="event-timeline" id="event-timeline">
             <li class="is-done">
@@ -593,6 +595,7 @@
       </symbol>
     </svg>
 
+    <script src="/trace-timeline.js"></script>
     <script src="/session-actions.js"></script>
     <script src="/app.js"></script>
   </body>
