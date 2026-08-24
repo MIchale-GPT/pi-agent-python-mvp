@@ -108,3 +108,17 @@ Run #3 「上海天气如何」                    ✓ completed · 2 turns · 1
 
 - 术语遵循仓库既有词汇：run / turn / trace / Trace Workbench / coding session。
 - 实现时按 AGENTS.md 纪律：先测试后扩展、原子提交、更新 `website/content/` 用户文档。
+
+## Persistence Extension (2026-08-24)
+
+本文档最初将「服务端 trace 历史持久化」列为 Out of Scope。该决定已被
+`dev-notes/web-trace-persistence-design.md` 修订并实现：
+
+- 服务端按会话维护有界事件环缓冲（约 600 条），订阅时以 `replay` 帧重放，
+  页面刷新即可恢复最近轨迹；
+- 事件镜像落盘至会话目录 `<session-id>.webtrace.jsonl`（超限原子压缩），
+  tau-web 重启后仍可回看；
+- 工具授权决定通过 `tool_authorization_resolved` 广播闭环；
+- 右侧面板合并为单一时间线树（run 分组 + 「会话事件」分组）。
+
+持久真相仍是会话 JSONL；webtrace 是 Web 宿主的展示投影。

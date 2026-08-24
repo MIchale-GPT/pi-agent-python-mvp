@@ -123,9 +123,12 @@ when the run settles.
 
 ## Read the per-run trace timeline
 
-The trace panel groups every event by run — one group per prompt you submit.
-Each group shows the prompt excerpt, the run status (running, completed,
-cancelled, failed), the number of turns, and the elapsed time.
+The trace panel is one unified timeline tree. Events are grouped by run — one
+group per prompt you submit — plus a trailing **会话事件** (session events)
+group that collects connection, configuration, and command events that do not
+belong to a run. Each run group shows the prompt excerpt, the run status
+(running, completed, cancelled, failed), the number of turns, and the elapsed
+time.
 
 Inside a group:
 
@@ -137,16 +140,24 @@ Inside a group:
 - each entry offers copy buttons for the formatted arguments and for the raw
   JSON event payload as delivered over SSE.
 
-If the browser reconnects while a run is still active, the server sends a
-`run_summary` event so the panel can restore counts and status without
-replaying history. The durable record of the conversation remains the session
-JSONL file; the timeline is a live view of the current process.
+The timeline survives a page reload: the server keeps a bounded buffer (about
+600 recent events) and replays it when your browser connects, so recent runs —
+including tool nodes with their arguments and results — reappear after you
+refresh. The same replay is mirrored to `<session-id>.webtrace.jsonl` beside
+the session JSONL, so after restarting `tau-web` the most recent history is
+restored from disk as well. When a browser reconnects while a run is still
+active, a `run_summary` event additionally restores live counts and status.
+The durable record of the conversation remains the session JSONL file; the
+webtrace file is a display projection and can be deleted freely alongside its
+session.
 
 ## Authorize tool calls
 
 Tau Web pauses before every tool execution and displays the tool name and
 arguments. Choose **Allow once**, **Deny**, or **Cancel run**. The first browser
-response wins when more than one tab is connected.
+response wins when more than one tab is connected, and the resolution is
+broadcast to every connected tab so all timelines show the final state — even
+after a reload.
 
 Tool execution defaults to denied when no browser event subscriber is
 connected, when the last subscriber disconnects during a pending request, or

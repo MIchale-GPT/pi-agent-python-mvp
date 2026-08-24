@@ -58,6 +58,12 @@ Tau Web 目前已经支持：
   - run 摘要（状态/轮次/耗时）随 `run_finished` 下发
   - 断线重连时通过 `run_summary` 恢复活动 run 的计数与状态
 
+- [x] **轨迹持久化与统一时间线**（spec 见 `dev-notes/web-trace-persistence-design.md`）
+  - 右侧合并为单一时间线树：run 分组 + 「会话事件」分组
+  - 刷新页面后重放最近约 600 条事件，轨迹不再丢失
+  - 落盘 `<session-id>.webtrace.jsonl`，tau-web 重启后仍可回看
+  - 工具授权决定广播闭环，多标签页状态一致
+
 ## P2：补齐工作区能力
 
 - [ ] **文件浏览与 Diff 查看**
