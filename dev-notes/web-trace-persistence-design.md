@@ -42,8 +42,9 @@ Date: 2026-08-24 · Status: approved design, pending implementation
 
 - **环缓冲**：`_WebSessionSlot` 新增 `trace_buffer: deque[dict[str, object]]`，
   上限 `TRACE_BUFFER_LIMIT = 600` 条，超出淘汰最旧。
-- **入缓冲范围**：凡经 `_trace_payload()` 包装转发给订阅者的事件均入缓冲并落盘；
-  连接层帧（`web_connected`、心跳）不入。新增事件类型：
+- **入缓冲范围**：凡经 `_publish()` 转发的会话事件均入缓冲并落盘
+  （含 run_started/run_finished/run_error/cancel_requested）；连接层帧
+  （`web_connected`）与按订阅者生成的控制帧不入。新增事件类型：
   - `tool_authorization_resolved {requestId, toolCallId, decision}`：
     在 `_respond_tool_authorization` 成功递交决定、以及
     `_resolve_pending_tool_authorizations`（超时/无订阅者拒绝）时发布。

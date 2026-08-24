@@ -51,7 +51,9 @@ from tau_coding.resources import TauResourcePaths
 from tau_coding.session import CodingSession, CodingSessionConfig
 from tau_coding.session_manager import CodingSessionRecord, SessionManager
 from tau_coding.web import (
+    TauWebRuntime,
     WebSessionHandle,
+    _WebSessionSlot,
     create_web_server,
     main,
     session_detail_payload,
@@ -1612,6 +1614,99 @@ def test_message_api_tags_trace_events_with_run_id_and_finish_summary(tmp_path: 
         thread.join(timeout=2)
 
 
+def test_sse_subscribe_replays_buffered_trace_events(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Replay session",
+        session_id="session-1",
+    )
+    provider = _StreamingFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    runner_connection = HTTPConnection(host, port, timeout=2)
+    late_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        runner_connection.request("GET", "/api/sessions/session-1/events")
+        runner_response = runner_connection.getresponse()
+        assert runner_response.status == 200
+
+        status, payload = _post_json(
+            runner_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Connect the A theme"},
+        )
+        assert status == 202
+        _read_sse_events(runner_response, until="run_finished")
+
+        late_connection.request("GET", "/api/sessions/session-1/events")
+        late_response = late_connection.getresponse()
+        assert late_response.status == 200
+
+        events = _read_sse_events(late_response, until="run_finished")
+        assert events[0]["type"] == "web_connected"
+        replayed = events[1:]
+        assert replayed[0]["type"] == "run_started"
+        assert replayed[-1]["type"] == "run_finished"
+        assert all(event.get("replay") is True for event in replayed)
+        assert "replay" not in events[0]
+        assert [event["type"] for event in replayed].count("message_update") >= 1
+    finally:
+        runner_connection.close()
+        late_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_trace_buffer_drops_oldest_events_beyond_limit(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Buffer session",
+        session_id="session-1",
+    )
+    runtime = TauWebRuntime(manager, lambda *args: None)  # type: ignore[arg-type]
+
+    async def publish_many() -> None:
+        slot = runtime._slots.setdefault(record.id, _WebSessionSlot())
+        for index in range(web_module.TRACE_BUFFER_LIMIT + 100):
+            runtime._publish(
+                slot,
+                {"type": "message_end", "sessionId": record.id, "index": index},
+            )
+
+    asyncio.run(publish_many())
+    slot = runtime._slots[record.id]
+    assert len(slot.trace_buffer) == web_module.TRACE_BUFFER_LIMIT
+    assert slot.trace_buffer[0]["index"] == 100
+    assert slot.trace_buffer[-1]["index"] == web_module.TRACE_BUFFER_LIMIT + 99
+    runtime.close()
+
+
 def test_sse_reconnect_mid_run_receives_active_run_summary(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     cwd = tmp_path / "project"
@@ -1663,9 +1758,11 @@ def test_sse_reconnect_mid_run_receives_active_run_summary(tmp_path: Path) -> No
         assert second_response.status == 200
 
         events = _read_sse_events(second_response, until="run_summary")
-        summary = events[-1]
-        assert [event["type"] for event in events] == ["web_connected", "run_summary"]
+        assert events[0]["type"] == "web_connected"
         assert events[0]["running"] is True
+        replayed = events[1:-1]
+        assert all(event.get("replay") is True for event in replayed)
+        summary = events[-1]
         assert summary["sessionId"] == "session-1"
         assert summary["runId"] == run_id
         assert summary["status"] == "running"
@@ -1948,11 +2045,10 @@ def test_running_session_accepts_steering_and_follow_up_and_can_clear_queue(
         events_connection.request("GET", "/api/sessions/session-1/events")
         events_response = events_connection.getresponse()
         connected = _read_sse_events(events_response, until="queue_update")
-        assert connected[-1] == {
-            "type": "queue_update",
-            "steering": ["Use the smaller API"],
-            "followUp": ["Then update the docs"],
-        }
+        assert connected[-1]["type"] == "queue_update"
+        follow_up_replay = _read_sse_events(events_response, until="queue_update")[-1]
+        assert follow_up_replay["steering"] == ["Use the smaller API"]
+        assert follow_up_replay["followUp"] == ["Then update the docs"]
 
         status, cleared = _post_json(
             command_connection,

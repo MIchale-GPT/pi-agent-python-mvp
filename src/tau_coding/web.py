@@ -9,6 +9,7 @@ import queue
 import sys
 import threading
 import webbrowser
+from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
@@ -104,6 +105,7 @@ _ASSET_CONTENT_TYPES = {
     "app.js": "text/javascript; charset=utf-8",
     "favicon.svg": "image/svg+xml",
 }
+TRACE_BUFFER_LIMIT = 600
 WebSessionLoader = Callable[
     [CodingSessionRecord, SessionManager],
     Awaitable["WebSessionHandle"],
@@ -174,6 +176,9 @@ class _WebSessionSlot:
     run_started_ms: int | None = None
     trace_event_count: int = 0
     trace_turn_count: int = 0
+    trace_buffer: deque[dict[str, object]] = field(
+        default_factory=lambda: deque(maxlen=TRACE_BUFFER_LIMIT)
+    )
 
 
 class WebSessionBusyError(RuntimeError):
@@ -382,6 +387,8 @@ class TauWebRuntime:
                 },
             )
         )
+        for buffered in list(slot.trace_buffer):
+            subscriber.put(self._stream_item(slot, {**buffered, "replay": True}))
         if slot.run_task is not None and not slot.run_task.done() and slot.run_id is not None:
             subscriber.put(
                 self._stream_item(
@@ -962,7 +969,17 @@ class TauWebRuntime:
             filename="tau-session.html",
         )
 
+    def _record_trace_event(
+        self,
+        slot: _WebSessionSlot,
+        payload: dict[str, object],
+    ) -> None:
+        """Buffer a forwarded session event so late subscribers can replay it."""
+        slot.trace_buffer.append(dict(payload))
+
     def _publish(self, slot: _WebSessionSlot, payload: dict[str, object]) -> None:
+        if payload.get("type") != "web_connected":
+            self._record_trace_event(slot, payload)
         item = self._stream_item(slot, payload)
         for subscriber in slot.subscribers.values():
             try:
