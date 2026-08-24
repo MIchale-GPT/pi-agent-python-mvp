@@ -1382,31 +1382,6 @@ kbd {
   font-weight: 450;
 }
 
-.event-timeline {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.event-timeline li {
-  position: relative;
-  display: grid;
-  min-height: 54px;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
-  gap: 8px;
-  padding-bottom: 8px;
-}
-
-.event-timeline li:not(:last-child)::after {
-  position: absolute;
-  top: 14px;
-  bottom: -2px;
-  left: 5px;
-  width: 1px;
-  background: var(--border-strong);
-  content: "";
-}
-
 .event-node {
   position: relative;
   z-index: 1;
@@ -1416,39 +1391,6 @@ kbd {
   border: 2px solid var(--dim);
   border-radius: 50%;
   background: var(--panel);
-}
-
-.event-timeline .is-done .event-node {
-  border-color: var(--success);
-}
-
-.event-timeline .is-current .event-node {
-  border-color: var(--accent);
-  background: var(--accent);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.event-timeline strong,
-.event-timeline small {
-  display: block;
-}
-
-.event-timeline strong {
-  font-family: var(--mono);
-  font-size: 8px;
-  font-weight: 600;
-}
-
-.event-timeline small {
-  margin-top: 4px;
-  color: var(--dim);
-  font-size: 8px;
-}
-
-.event-timeline time {
-  color: var(--dim);
-  font-family: var(--mono);
-  font-size: 7px;
 }
 
 .run-timeline {
@@ -1463,6 +1405,11 @@ kbd {
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel) 60%, transparent);
   overflow: hidden;
+}
+
+.run-group.is-session .run-head-text strong {
+  color: var(--muted);
+  font-weight: 500;
 }
 
 .run-head {
@@ -1535,6 +1482,13 @@ kbd {
 
 .run-item.kind-error .run-item-body strong {
   color: var(--danger, #e5534b);
+}
+
+.run-item.kind-session p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .tool-details summary {

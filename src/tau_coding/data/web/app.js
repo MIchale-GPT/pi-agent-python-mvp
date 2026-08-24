@@ -86,7 +86,13 @@ let toastTimer;
 function element(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
+  if (text !== undefined) {
+    if (typeof text === "string" || typeof text === "number") {
+      node.textContent = text;
+    } else {
+      console.warn("[tau-web] element() received non-primitive text", tag, className, text);
+    }
+  }
   return node;
 }
 
@@ -455,26 +461,11 @@ function setSessionFacts(session, messageCount, configuration = state.configurat
 }
 
 function markIndexLoaded(count) {
-  const item = document.querySelector("#session-index-event");
-  item.classList.remove("is-current");
-  item.classList.add("is-done");
-  item.querySelector("strong").textContent = "session_index_loaded";
-  item.querySelector("small").textContent = `${count} indexed sessions`;
-  item.querySelector("time").textContent = "ok";
+  addTraceEvent("session_index_loaded", `${count} indexed sessions`);
 }
 
 function markBranchLoaded(messageCount) {
-  document.querySelector("#event-timeline .branch-event")?.remove();
-  const item = element("li", "is-current branch-event");
-  const node = element("span", "event-node");
-  const content = element("div");
-  content.append(
-    element("strong", null, "active_branch_loaded"),
-    element("small", null, `${messageCount} visible messages`),
-  );
-  item.append(node, content, element("time", null, "now"));
-  document.querySelector("#event-timeline").append(item);
-  document.querySelector("#trace-state").textContent = "session_ready";
+  addTraceEvent("active_branch_loaded", `${messageCount} visible messages`);
 }
 
 function setComposerState() {
@@ -531,16 +522,8 @@ function renderQueue() {
 }
 
 function addTraceEvent(type, detail = "") {
-  const timeline = document.querySelector("#event-timeline");
-  const item = element("li", "is-current live-event");
-  const node = element("span", "event-node");
-  const content = element("div");
-  content.append(element("strong", null, type), element("small", null, detail));
-  item.append(node, content, element("time", null, "now"));
-  timeline.querySelectorAll(".live-event").forEach((event) => event.classList.remove("is-current"));
-  timeline.append(item);
-  const liveEvents = timeline.querySelectorAll(".live-event");
-  if (liveEvents.length > 9) liveEvents[0].remove();
+  recordTraceEvent({ type, message: typeof detail === "string" ? detail : "" });
+  renderRunTimeline();
   document.querySelector("#trace-state").textContent = type;
 }
 
@@ -628,7 +611,10 @@ function renderRunTimeline() {
     for (const item of run.items) {
       items.append(renderRunItem(item));
     }
-    const group = element("li", `run-group is-${run.status}`);
+    const group = element(
+      "li",
+      `run-group is-${run.status}${run.isSession ? " is-session" : ""}`,
+    );
     group.append(head);
     if (run.items.length > 0) group.append(items);
     container.append(group);
@@ -777,6 +763,13 @@ function showToolAuthorization(event, sessionId) {
 
 async function handleLiveEvent(event, sessionId) {
   if (sessionId !== state.activeSessionId) return;
+  if (event.replay) {
+    recordTraceEvent(event);
+    if (event.type !== "message_update") {
+      renderRunTimeline();
+    }
+    return;
+  }
   recordTraceEvent(event);
   const shouldRerenderTimeline = event.type !== "message_update";
   if (shouldRerenderTimeline) {
