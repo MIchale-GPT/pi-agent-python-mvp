@@ -226,6 +226,7 @@ function applyRunEvent(run, event, decisions) {
 function toPublicRun(run) {
   return {
     runId: run.runId,
+    isSession: run.isSession,
     title: run.isSession ? "会话事件" : (run.title ?? "(无用户输入)"),
     status: run.status,
     turnCount: run.turnCount,

@@ -80,6 +80,23 @@ test("groups events by runId, titles runs from the first user prompt, and caps h
   );
 });
 
+test("public runs expose isSession so renderers can style the session group", () => {
+  const events = [
+    { type: "web_connected", running: false },
+    { type: "run_started", runId: RUN_A },
+    userStart("第一问"),
+  ];
+  const { runs } = buildTraceTimeline(events);
+
+  assert.deepEqual(
+    runs.map((run) => [run.runId, run.isSession]),
+    [
+      [RUN_A, false],
+      ["__session__", true],
+    ],
+  );
+});
+
 test("merges authorization and execution events into one tool item lifecycle", () => {
   const events = [
     { type: "run_started", runId: RUN_A },
