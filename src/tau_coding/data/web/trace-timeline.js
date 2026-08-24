@@ -7,6 +7,14 @@
 // `node --test tests/web/` and loaded as a classic browser script.
 
 const MAX_TITLE_LENGTH = 60;
+const SESSION_RUN_ID = "__session__";
+const AUTHORIZATION_STATUS_BY_DECISION = {
+  allow: "allowed",
+  deny: "denied",
+  cancel: "cancelled",
+  timeout: "cancelled",
+  no_subscriber: "denied",
+};
 
 function textFromContent(content) {
   if (typeof content === "string") {
@@ -29,9 +37,10 @@ function excerpt(text, maxLength = MAX_TITLE_LENGTH) {
   return `${flat.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-function createRun(runId) {
+function createRun(runId, isSession = false) {
   return {
     runId,
+    isSession,
     title: null,
     status: "running",
     turnCount: null,
@@ -159,6 +168,19 @@ function applyRunEvent(run, event, decisions) {
       item.rawJson = rawJson(event);
       return;
     }
+    case "tool_authorization_resolved": {
+      const item = run.toolsByCallId.get(event.toolCallId);
+      if (item === undefined || !item.authorization) {
+        return;
+      }
+      const status =
+        AUTHORIZATION_STATUS_BY_DECISION[event.decision] ?? String(event.decision ?? "");
+      item.authorization.status = status;
+      if ((status === "denied" || status === "cancelled") && item.state === "running") {
+        item.state = status === "denied" ? "denied" : "cancelled";
+      }
+      return;
+    }
     case "turn_start":
     case "turn_end": {
       if (event.type === "turn_start") {
@@ -204,7 +226,7 @@ function applyRunEvent(run, event, decisions) {
 function toPublicRun(run) {
   return {
     runId: run.runId,
-    title: run.title ?? "(无用户输入)",
+    title: run.isSession ? "会话事件" : (run.title ?? "(无用户输入)"),
     status: run.status,
     turnCount: run.turnCount,
     eventCount: run.eventCount,
@@ -218,15 +240,15 @@ function buildTraceTimeline(events, options = {}) {
   const maxRuns = options.maxRuns ?? 8;
   const authorizationDecisions = options.authorizationDecisions ?? {};
   const runsById = new Map();
-  const orderedRunIds = [];
-  const ungrouped = [];
+  const runOrderIds = [];
+  let sessionSeen = false;
 
   for (const event of events) {
     const runId = event?.runId;
     if (event.type === "run_started") {
       if (!runsById.has(runId)) {
         runsById.set(runId, createRun(runId));
-        orderedRunIds.push(runId);
+        runOrderIds.push(runId);
       }
       continue;
     }
@@ -242,17 +264,34 @@ function buildTraceTimeline(events, options = {}) {
     ) {
       // Events observed before run_started (e.g. after reconnect): open a run lazily.
       runsById.set(runId, createRun(runId));
-      orderedRunIds.push(runId);
+      runOrderIds.push(runId);
       applyRunEvent(runsById.get(runId), event, authorizationDecisions);
       continue;
     }
-    ungrouped.push({ type: event.type, detail: excerpt(event.toolName || event.message || "") });
+    // Events outside any run (connection/command/config chatter) land in a
+    // synthetic session bucket that never consumes a maxRuns slot.
+    if (!runsById.has(SESSION_RUN_ID)) {
+      runsById.set(SESSION_RUN_ID, createRun(SESSION_RUN_ID, true));
+      sessionSeen = true;
+    }
+    const sessionRun = runsById.get(SESSION_RUN_ID);
+    sessionRun.items.push({
+      kind: "session",
+      type: event.type,
+      detail: excerpt(event.toolName || event.message || ""),
+      rawJson: rawJson(event),
+      timestamp: event.timestamp ?? null,
+      turn: 0,
+    });
   }
 
-  const recentRunIds = orderedRunIds.slice(-maxRuns);
+  const recentRunIds = [
+    ...runOrderIds.slice(-maxRuns),
+    ...(sessionSeen ? [SESSION_RUN_ID] : []),
+  ];
   return {
     runs: recentRunIds.map((runId) => toPublicRun(runsById.get(runId))),
-    ungrouped,
+    ungrouped: [],
   };
 }
 

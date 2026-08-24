@@ -59,17 +59,24 @@ test("groups events by runId, titles runs from the first user prompt, and caps h
   ];
   const timeline = buildTraceTimeline(events, { maxRuns: 1 });
 
-  assert.equal(timeline.runs.length, 1);
-  assert.equal(timeline.runs[0].runId, RUN_B);
+  assert.deepEqual(
+    timeline.runs.map((run) => run.runId),
+    [RUN_B, "__session__"],
+  );
   assert.equal(timeline.runs[0].title, "第二问");
   assert.equal(timeline.runs[0].status, "running");
-  assert.equal(timeline.ungrouped.length, 1);
-  assert.equal(timeline.ungrouped[0].type, "web_connected");
+  assert.deepEqual(timeline.ungrouped, []);
+
+  const sessionRun = timeline.runs[1];
+  assert.equal(sessionRun.title, "会话事件");
+  assert.equal(sessionRun.items.length, 1);
+  assert.equal(sessionRun.items[0].kind, "session");
+  assert.equal(sessionRun.items[0].type, "web_connected");
 
   const full = buildTraceTimeline(events);
   assert.deepEqual(
     full.runs.map((run) => run.runId),
-    [RUN_A, RUN_B],
+    [RUN_A, RUN_B, "__session__"],
   );
 });
 
@@ -281,4 +288,97 @@ test("merges a reconnect run_summary into the active run", () => {
   assert.equal(runs[0].eventCount, 7);
   assert.equal(runs[0].turnCount, 1);
   assert.equal(runs[0].elapsedMs, 9000);
+});
+
+test("groups events without a runId into a synthetic session group", () => {
+  const events = [
+    { type: "configuration_updated", providerName: "fake", model: "m1", timestamp: 1 },
+    { type: "run_started", runId: RUN_A },
+    userStart("问题"),
+    runFinished({}),
+    { type: "command_result", command: "/help", message: "ok", timestamp: 2 },
+  ];
+
+  const { runs, ungrouped } = buildTraceTimeline(events, {});
+  const sessionRun = runs.find((run) => run.runId === "__session__");
+  const normalRun = runs.find((run) => run.runId === RUN_A);
+
+  assert.ok(normalRun);
+  assert.deepEqual(ungrouped, []);
+  assert.equal(sessionRun.title, "会话事件");
+  assert.equal(sessionRun.items.length, 2);
+  assert.equal(sessionRun.items[0].kind, "session");
+  assert.equal(sessionRun.items[0].type, "configuration_updated");
+  assert.equal(sessionRun.items[1].type, "command_result");
+});
+
+test("applies authorization resolutions by requestId", () => {
+  const base = [
+    { type: "run_started", runId: RUN_A },
+    {
+      type: "tool_authorization_requested",
+      runId: RUN_A,
+      requestId: "auth-1",
+      toolCallId: "call-1",
+      toolName: "write_file",
+      arguments: {},
+    },
+  ];
+
+  const denied = buildTraceTimeline([
+    ...base,
+    {
+      type: "tool_authorization_resolved",
+      runId: RUN_A,
+      requestId: "auth-1",
+      toolCallId: "call-1",
+      decision: "deny",
+    },
+  ]).runs[0].items.filter((item) => item.kind === "tool")[0];
+  assert.equal(denied.authorization.status, "denied");
+  assert.equal(denied.state, "denied");
+
+  const cancelled = buildTraceTimeline([
+    ...base,
+    {
+      type: "tool_authorization_resolved",
+      runId: RUN_A,
+      requestId: "auth-1",
+      toolCallId: "call-1",
+      decision: "timeout",
+    },
+  ]).runs[0].items.filter((item) => item.kind === "tool")[0];
+  assert.equal(cancelled.authorization.status, "cancelled");
+  assert.equal(cancelled.state, "cancelled");
+
+  const allowed = buildTraceTimeline([
+    ...base,
+    toolStart("call-1", "write_file", {}),
+    {
+      type: "tool_authorization_resolved",
+      runId: RUN_A,
+      requestId: "auth-1",
+      toolCallId: "call-1",
+      decision: "allow",
+    },
+  ]).runs[0].items.filter((item) => item.kind === "tool")[0];
+  assert.equal(allowed.authorization.status, "allowed");
+  assert.equal(allowed.state, "running");
+});
+
+test("rebuilds multiple runs from a replayed buffer and keeps maxRuns", () => {
+  const events = [
+    { type: "run_started", runId: "run-a" },
+    userStart("第一问"),
+    runFinished({}),
+    { type: "run_started", runId: "run-b" },
+    userStart("第二问"),
+    runFinished({}),
+    { type: "run_started", runId: "run-c" },
+    userStart("第三问"),
+    runFinished({}),
+  ];
+
+  const { runs } = buildTraceTimeline(events, { maxRuns: 2 });
+  assert.deepEqual(runs.map((run) => run.runId), ["run-b", "run-c"]);
 });
