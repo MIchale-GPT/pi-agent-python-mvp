@@ -71,6 +71,12 @@ def _get_json(connection: HTTPConnection, path: str) -> tuple[int, dict[str, Any
     return response.status, json.loads(response.read())
 
 
+def _get_html(connection: HTTPConnection, path: str) -> tuple[int, str]:
+    connection.request("GET", path)
+    response = connection.getresponse()
+    return response.status, response.read().decode("utf-8")
+
+
 async def _load_test_session(
     selected: CodingSessionRecord,
     selected_manager: SessionManager,
@@ -269,6 +275,29 @@ def test_web_server_serves_live_a_theme_and_session_api(tmp_path: Path) -> None:
         status, payload = _get_json(connection, "/api/sessions/missing")
         assert status == 404
         assert payload == {"error": "session_not_found"}
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_index_html_scripts_are_cache_busted(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    server = create_web_server(host="127.0.0.1", port=0, session_manager=manager)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    connection = HTTPConnection(host, port, timeout=2)
+    try:
+        status, body = _get_html(connection, "/")
+        assert status == 200
+        for name in ("trace-timeline.js", "session-actions.js", "app.js"):
+            pattern = f'src="/{name}?v='
+            assert pattern in body, f"missing cache bust for {name}"
+        version = server.asset_versions["app.js"]
+        assert len(version) == 8
+        assert f'src="/app.js?v={version}"' in body
     finally:
         connection.close()
         server.shutdown()

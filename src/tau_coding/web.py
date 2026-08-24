@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -112,6 +113,26 @@ _ASSET_CONTENT_TYPES = {
 TRACE_BUFFER_LIMIT = 600
 TRACE_FILE_COMPACT_LINES = 1200
 TRACE_FILE_KEEP_LINES = 600
+_SCRIPT_ASSETS = ("trace-timeline.js", "session-actions.js", "app.js")
+
+
+def _asset_versions() -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for name in (*_SCRIPT_ASSETS, "index.html"):
+        digest = hashlib.sha256()
+        digest.update(files("tau_coding").joinpath("data", "web", name).read_bytes())
+        versions[name] = digest.hexdigest()[:8]
+    return versions
+
+
+def _cache_busted_index_html(body: bytes, versions: dict[str, str]) -> bytes:
+    html = body.decode("utf-8")
+    for name in _SCRIPT_ASSETS:
+        html = html.replace(
+            f'src="/{name}"',
+            f'src="/{name}?v={versions[name]}"',
+        )
+    return html.encode("utf-8")
 WebSessionLoader = Callable[
     [CodingSessionRecord, SessionManager],
     Awaitable["WebSessionHandle"],
@@ -1497,6 +1518,7 @@ class TauWebServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, TauWebRequestHandler)
         self.web_runtime = TauWebRuntime(session_manager, session_loader)
+        self.asset_versions = _asset_versions()
 
     def server_close(self) -> None:
         """Close live coding sessions before releasing the listening socket."""
@@ -1566,6 +1588,8 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             self._send_json({"error": "asset_not_found"}, status=HTTPStatus.NOT_FOUND)
             return
+        if asset_name == "index.html":
+            body = _cache_busted_index_html(body, self._tau_server.asset_versions)
         self._send_bytes(body, content_type=_ASSET_CONTENT_TYPES[asset_name])
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
