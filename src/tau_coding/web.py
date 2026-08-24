@@ -425,7 +425,7 @@ class TauWebRuntime:
         if slot is not None:
             slot.subscribers.pop(subscriber_id, None)
             if not slot.subscribers:
-                self._resolve_pending_tool_authorizations(slot, "deny")
+                self._resolve_pending_tool_authorizations(session_id, slot, "deny")
 
     async def _submit(
         self,
@@ -653,7 +653,7 @@ class TauWebRuntime:
         if slot is None or slot.handle is None or slot.run_task is None or slot.run_task.done():
             return False
         slot.cancel_requested = True
-        self._resolve_pending_tool_authorizations(slot, "cancel")
+        self._resolve_pending_tool_authorizations(session_id, slot, "cancel")
         slot.handle.session.cancel()
         if slot.run_kind == "compact":
             slot.run_task.cancel()
@@ -701,9 +701,24 @@ class TauWebRuntime:
                 timeout=_TOOL_AUTHORIZATION_TIMEOUT_SECONDS,
             )
         except TimeoutError:
+            self._publish(
+                slot,
+                _trace_payload(
+                    slot,
+                    _tool_authorization_resolved_payload(request_id, call.id, "timeout"),
+                ),
+            )
             return True, "Tool execution denied because authorization timed out"
         finally:
             slot.pending_tool_authorizations.pop(request_id, None)
+
+        self._publish(
+            slot,
+            _trace_payload(
+                slot,
+                _tool_authorization_resolved_payload(request_id, call.id, decision),
+            ),
+        )
 
         if decision == "allow":
             return False, None
@@ -730,14 +745,28 @@ class TauWebRuntime:
         pending.decision.set_result(decision)
         return True
 
-    @staticmethod
     def _resolve_pending_tool_authorizations(
+        self,
+        session_id: str,
         slot: _WebSessionSlot,
         decision: ToolAuthorizationDecision,
     ) -> None:
+        published = "no_subscriber" if decision == "deny" else decision
         for pending in slot.pending_tool_authorizations.values():
-            if not pending.decision.done():
-                pending.decision.set_result(decision)
+            if pending.decision.done():
+                continue
+            pending.decision.set_result(decision)
+            self._publish(
+                slot,
+                _trace_payload(
+                    slot,
+                    _tool_authorization_resolved_payload(
+                        pending.request_id,
+                        pending.call.id,
+                        published,
+                    ),
+                ),
+            )
 
     async def _session_list(self) -> dict[str, object]:
         return session_list_payload(self._manager)
@@ -1022,8 +1051,8 @@ class TauWebRuntime:
 
     async def _shutdown(self) -> None:
         active_tasks: list[asyncio.Task[None]] = []
-        for slot in self._slots.values():
-            self._resolve_pending_tool_authorizations(slot, "cancel")
+        for session_id, slot in self._slots.items():
+            self._resolve_pending_tool_authorizations(session_id, slot, "cancel")
             if slot.handle is not None and slot.run_task is not None and not slot.run_task.done():
                 slot.cancel_requested = True
                 slot.handle.session.cancel()
@@ -2299,6 +2328,19 @@ def _tool_authorization_event_payload(
         "toolCallId": pending.call.id,
         "toolName": pending.call.name,
         "arguments": pending.call.arguments,
+    }
+
+
+def _tool_authorization_resolved_payload(
+    request_id: str,
+    tool_call_id: str,
+    decision: str,
+) -> dict[str, object]:
+    return {
+        "type": "tool_authorization_resolved",
+        "requestId": request_id,
+        "toolCallId": tool_call_id,
+        "decision": decision,
     }
 
 

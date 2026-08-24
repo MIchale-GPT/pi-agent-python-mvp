@@ -2371,6 +2371,198 @@ def test_tool_authorization_defaults_to_deny_when_the_browser_disconnects(
         thread.join(timeout=2)
 
 
+def test_tool_authorization_decision_is_broadcast_to_subscribers(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Auth broadcast session",
+        session_id="session-1",
+    )
+    provider = _ToolCallingFakeProvider()
+
+    async def execute(
+        tool_call_id: str,
+        arguments: Mapping[str, object],
+        signal: CancellationToken | None = None,
+        on_update: object = None,
+    ) -> AgentToolResult:
+        del tool_call_id, arguments, signal, on_update
+        return AgentToolResult(content="tool completed")
+
+    tool = AgentTool(
+        name="write_file",
+        label="Write file",
+        description="Write a project file.",
+        parameters={"type": "object"},
+        execute_fn=execute,
+    )
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(
+            selected,
+            selected_manager,
+            provider,
+            tools=[tool],
+        )
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    events_connection = HTTPConnection(host, port, timeout=2)
+    command_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        events_connection.request("GET", "/api/sessions/session-1/events")
+        events_response = events_connection.getresponse()
+        status, _payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Use the write tool"},
+        )
+        assert status == 202
+        events = _read_sse_events(
+            events_response,
+            until="tool_authorization_requested",
+        )
+        request = events[-1]
+
+        status, _resolved = _post_json(
+            command_connection,
+            f"/api/sessions/session-1/tool-authorizations/{request['requestId']}",
+            {"decision": "allow"},
+        )
+        assert status == 200
+
+        follow_up = _read_sse_events(
+            events_response,
+            until="tool_authorization_resolved",
+        )
+        resolved = follow_up[-1]
+        assert resolved["requestId"] == request["requestId"]
+        assert resolved["toolCallId"] == request["toolCallId"]
+        assert resolved["decision"] == "allow"
+        assert resolved["runId"] == request["runId"]
+    finally:
+        events_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_disconnect_denied_authorization_is_visible_after_reconnect(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Disconnect deny session",
+        session_id="session-1",
+    )
+
+    class NeverEndingToolProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.finished = Event()
+
+        def stream_response(
+            self,
+            *,
+            model: str,
+            system: str,
+            messages: list[AgentMessage],
+            tools: list[AgentTool],
+            signal: CancellationToken | None = None,
+        ) -> AsyncIterator[AssistantMessageEvent]:
+            del model, system, messages, tools, signal
+            self.calls += 1
+            call_number = self.calls
+
+            async def iterator() -> AsyncIterator[AssistantMessageEvent]:
+                if call_number > 1:
+                    yield assistant_start(model="fake")
+                    yield assistant_done(
+                        message=AssistantMessage(content="Finished.", model="fake")
+                    )
+                    self.finished.set()
+                    return
+                call = ToolCall(id="call-1", name="write_file", arguments={"path": "notes.md"})
+                assistant = AssistantMessage(content=[call], model="fake")
+                yield assistant_start(model="fake")
+                yield tool_call_end(call)
+                yield assistant_done(message=assistant, finish_reason="toolUse")
+
+            return iterator()
+
+    provider = NeverEndingToolProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    second_connection = HTTPConnection(host, port, timeout=2)
+    command_connection = HTTPConnection(host, port, timeout=2)
+
+    try:
+        subscriber_id, subscriber = server.web_runtime.subscribe("session-1")
+        status, _payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Trigger authorization"},
+        )
+        assert status == 202
+        while True:
+            item = subscriber.get(timeout=1)
+            assert item is not None
+            if item.payload["type"] == "tool_authorization_requested":
+                break
+
+        # 断开唯一订阅者 → 未决授权被自动拒绝
+        server.web_runtime.unsubscribe("session-1", subscriber_id)
+        assert provider.finished.wait(timeout=1)
+
+        second_connection.request("GET", "/api/sessions/session-1/events")
+        second_response = second_connection.getresponse()
+        events = _read_sse_events(second_response, until="tool_authorization_resolved")
+        requested = [e for e in events if e["type"] == "tool_authorization_requested"]
+        resolved = events[-1]
+        assert requested, "authorization request should be replayed"
+        assert resolved["requestId"] == requested[-1]["requestId"]
+        assert resolved["decision"] == "no_subscriber"
+    finally:
+        second_connection.close()
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_delete_api_refuses_to_remove_a_running_session(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     cwd = tmp_path / "project"
