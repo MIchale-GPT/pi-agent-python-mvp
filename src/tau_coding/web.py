@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
 import queue
 import sys
 import threading
@@ -81,6 +83,8 @@ from tau_coding.session_manager import CodingSessionRecord, SessionManager
 from tau_coding.shell_config import load_shell_settings
 from tau_coding.version import current_version
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 8080
 _MAX_MESSAGE_TEXT = 100_000
@@ -106,6 +110,8 @@ _ASSET_CONTENT_TYPES = {
     "favicon.svg": "image/svg+xml",
 }
 TRACE_BUFFER_LIMIT = 600
+TRACE_FILE_COMPACT_LINES = 1200
+TRACE_FILE_KEEP_LINES = 600
 WebSessionLoader = Callable[
     [CodingSessionRecord, SessionManager],
     Awaitable["WebSessionHandle"],
@@ -179,6 +185,8 @@ class _WebSessionSlot:
     trace_buffer: deque[dict[str, object]] = field(
         default_factory=lambda: deque(maxlen=TRACE_BUFFER_LIMIT)
     )
+    trace_file_lines: int = 0
+    trace_backfilled: bool = False
 
 
 class WebSessionBusyError(RuntimeError):
@@ -371,8 +379,9 @@ class TauWebRuntime:
         self,
         session_id: str,
     ) -> tuple[int, queue.Queue[_StreamItem | None]]:
-        self._require_session(session_id)
+        record = self._require_session(session_id)
         slot = self._slots.setdefault(session_id, _WebSessionSlot())
+        self._backfill_trace_from_disk(record, slot)
         subscriber_id = slot.next_subscriber_id
         slot.next_subscriber_id += 1
         subscriber: queue.Queue[_StreamItem | None] = queue.Queue(maxsize=_SSE_QUEUE_ITEMS)
@@ -460,7 +469,7 @@ class TauWebRuntime:
                 streaming_behavior=streaming_behavior,
             ):
                 pass
-            self._publish_queue_update(slot)
+            self._publish_queue_update(slot, record=record)
             return {
                 "status": "queued",
                 "behavior": streaming_behavior,
@@ -480,6 +489,7 @@ class TauWebRuntime:
                 "sessionId": record.id,
                 "runId": run_id,
             },
+            record=record,
         )
         if command_name == "compact":
             command = handle.session.handle_command(message)
@@ -531,17 +541,18 @@ class TauWebRuntime:
     ) -> None:
         assert slot.handle is not None
         status: RunStatus = "completed"
+        record = self._require_session(session_id)
         try:
             async for event in slot.handle.session.prompt(message):
                 payload = _coding_event_payload(event)
                 payload["runId"] = run_id
                 payload["timestamp"] = current_timestamp_ms()
-                self._publish(slot, payload)
+                self._publish(slot, payload, record=record)
                 slot.trace_event_count += 1
                 if isinstance(event, TurnEndEvent):
                     slot.trace_turn_count += 1
                 if isinstance(event, MessageStartEvent):
-                    self._publish_queue_update(slot, only_if_changed=True)
+                    self._publish_queue_update(slot, only_if_changed=True, record=record)
                 if (
                     isinstance(event, MessageEndEvent)
                     and isinstance(event.message, AssistantMessage)
@@ -563,6 +574,7 @@ class TauWebRuntime:
                                     event.message.error_message or "The provider run failed"
                                 ),
                             },
+                            record=record,
                         )
         except Exception as exc:
             status = "failed"
@@ -574,6 +586,7 @@ class TauWebRuntime:
                     "runId": run_id,
                     "message": str(exc) or type(exc).__name__,
                 },
+                record=record,
             )
         finally:
             if slot.cancel_requested and status == "completed":
@@ -589,6 +602,7 @@ class TauWebRuntime:
     ) -> None:
         assert slot.handle is not None
         status: RunStatus = "completed"
+        record = self._require_session(session_id)
         try:
             message = await slot.handle.session.compact(instructions or None)
             self._publish(
@@ -600,6 +614,7 @@ class TauWebRuntime:
                     "command": "/compact",
                     "message": message,
                 },
+                record=record,
             )
         except asyncio.CancelledError:
             status = "cancelled"
@@ -613,6 +628,7 @@ class TauWebRuntime:
                     "runId": run_id,
                     "message": str(exc) or type(exc).__name__,
                 },
+                record=record,
             )
         finally:
             self._finish_run(session_id, slot, run_id, status)
@@ -624,6 +640,7 @@ class TauWebRuntime:
         run_id: str,
         status: RunStatus,
     ) -> None:
+        record = self._require_session(session_id)
         snapshot = _run_trace_snapshot(slot)
         self._publish(
             slot,
@@ -637,6 +654,7 @@ class TauWebRuntime:
                 "eventCount": snapshot["eventCount"],
                 "durationMs": snapshot["elapsedMs"],
             },
+            record=record,
         )
         slot.run_task = None
         slot.run_id = None
@@ -645,15 +663,15 @@ class TauWebRuntime:
         slot.run_started_ms = None
         slot.trace_event_count = 0
         slot.trace_turn_count = 0
-        self._publish_queue_update(slot, only_if_changed=True)
+        self._publish_queue_update(slot, only_if_changed=True, record=record)
 
     async def _cancel(self, session_id: str) -> bool:
-        self._require_session(session_id)
+        record = self._require_session(session_id)
         slot = self._slots.get(session_id)
         if slot is None or slot.handle is None or slot.run_task is None or slot.run_task.done():
             return False
         slot.cancel_requested = True
-        self._resolve_pending_tool_authorizations(session_id, slot, "cancel")
+        self._resolve_pending_tool_authorizations(session_id, slot, "cancel", record=record)
         slot.handle.session.cancel()
         if slot.run_kind == "compact":
             slot.run_task.cancel()
@@ -664,6 +682,7 @@ class TauWebRuntime:
                 "sessionId": session_id,
                 "runId": slot.run_id,
             },
+            record=record,
         )
         return True
 
@@ -672,7 +691,7 @@ class TauWebRuntime:
         slot = self._slots.setdefault(session_id, _WebSessionSlot())
         handle = await self._ensure_handle(record, slot)
         handle.session.clear_queued_messages()
-        self._publish_queue_update(slot)
+        self._publish_queue_update(slot, record=record)
         return {
             "status": "cleared",
             "queue": _queue_payload(handle.session),
@@ -684,6 +703,7 @@ class TauWebRuntime:
         slot: _WebSessionSlot,
         call: ToolCall,
     ) -> tuple[bool, str | None]:
+        record = self._require_session(session_id)
         if not slot.subscribers:
             return True, "Tool execution denied because no Tau Web client is connected"
 
@@ -694,7 +714,9 @@ class TauWebRuntime:
             decision=self._loop.create_future(),
         )
         slot.pending_tool_authorizations[request_id] = pending
-        self._publish(slot, _trace_payload(slot, _tool_authorization_event_payload(pending)))
+        self._publish(
+            slot, _trace_payload(slot, _tool_authorization_event_payload(pending)), record=record
+        )
         try:
             decision = await asyncio.wait_for(
                 pending.decision,
@@ -707,6 +729,7 @@ class TauWebRuntime:
                     slot,
                     _tool_authorization_resolved_payload(request_id, call.id, "timeout"),
                 ),
+                record=record,
             )
             return True, "Tool execution denied because authorization timed out"
         finally:
@@ -718,6 +741,7 @@ class TauWebRuntime:
                 slot,
                 _tool_authorization_resolved_payload(request_id, call.id, decision),
             ),
+            record=record,
         )
 
         if decision == "allow":
@@ -750,6 +774,8 @@ class TauWebRuntime:
         session_id: str,
         slot: _WebSessionSlot,
         decision: ToolAuthorizationDecision,
+        *,
+        record: CodingSessionRecord | None = None,
     ) -> None:
         published = "no_subscriber" if decision == "deny" else decision
         for pending in slot.pending_tool_authorizations.values():
@@ -766,6 +792,7 @@ class TauWebRuntime:
                         published,
                     ),
                 ),
+                record=record,
             )
 
     async def _session_list(self) -> dict[str, object]:
@@ -955,11 +982,17 @@ class TauWebRuntime:
                 "type": "configuration_updated",
                 **configuration,
             },
+            record=record,
         )
         return payload
 
     async def _delete_session(self, session_id: str) -> None:
-        self._require_session(session_id)
+        record = self._require_session(session_id)
+        webtrace = self._webtrace_path(record)
+        try:
+            webtrace.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Tau Web could not remove %s: %s", webtrace, exc)
         slot = self._slots.get(session_id)
         if slot is not None and slot.run_task is not None and not slot.run_task.done():
             raise WebSessionBusyError("A running session cannot be deleted")
@@ -998,17 +1031,82 @@ class TauWebRuntime:
             filename="tau-session.html",
         )
 
+    def _webtrace_path(self, record: CodingSessionRecord) -> Path:
+        return record.path.with_name(f"{record.path.stem}.webtrace.jsonl")
+
+    def _backfill_trace_from_disk(self, record: CodingSessionRecord, slot: _WebSessionSlot) -> None:
+        """Load the tail of the persisted trace into an empty in-memory buffer."""
+        if slot.trace_backfilled:
+            return
+        slot.trace_backfilled = True
+        path = self._webtrace_path(record)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning("Tau Web could not read %s: %s", path, exc)
+            return
+        loaded: list[dict[str, object]] = []
+        for line in lines[-TRACE_BUFFER_LIMIT:]:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Tau Web skipped a corrupt webtrace line in %s", path)
+                continue
+            if isinstance(payload, dict):
+                payload.pop("replay", None)
+                loaded.append(payload)
+        slot.trace_buffer.extendleft(reversed(loaded))
+
+    def _persist_trace_event(
+        self, record: CodingSessionRecord, slot: _WebSessionSlot, payload: dict[str, object]
+    ) -> None:
+        path = self._webtrace_path(record)
+        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError as exc:
+            logger.warning("Tau Web could not append to %s: %s", path, exc)
+            slot.trace_file_lines = -1  # 不可写标记：本次运行不再尝试写盘
+            return
+        slot.trace_file_lines += 1
+        if slot.trace_file_lines > 0 and slot.trace_file_lines > TRACE_FILE_COMPACT_LINES:
+            self._compact_webtrace(path, slot)
+
+    @staticmethod
+    def _compact_webtrace(path: Path, slot: _WebSessionSlot) -> None:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            kept = lines[-TRACE_FILE_KEEP_LINES:]
+            temp = path.with_suffix(".webtrace.jsonl.tmp")
+            temp.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+            os.replace(temp, path)
+            slot.trace_file_lines = len(kept)
+        except OSError as exc:
+            logger.warning("Tau Web could not compact %s: %s", path, exc)
+
     def _record_trace_event(
         self,
+        record: CodingSessionRecord | None,
         slot: _WebSessionSlot,
         payload: dict[str, object],
     ) -> None:
         """Buffer a forwarded session event so late subscribers can replay it."""
         slot.trace_buffer.append(dict(payload))
+        if record is not None and slot.trace_file_lines >= 0:
+            self._persist_trace_event(record, slot, payload)
 
-    def _publish(self, slot: _WebSessionSlot, payload: dict[str, object]) -> None:
+    def _publish(
+        self,
+        slot: _WebSessionSlot,
+        payload: dict[str, object],
+        *,
+        record: CodingSessionRecord | None = None,
+    ) -> None:
         if payload.get("type") != "web_connected":
-            self._record_trace_event(slot, payload)
+            self._record_trace_event(record, slot, payload)
         item = self._stream_item(slot, payload)
         for subscriber in slot.subscribers.values():
             try:
@@ -1032,6 +1130,7 @@ class TauWebRuntime:
         slot: _WebSessionSlot,
         *,
         only_if_changed: bool = False,
+        record: CodingSessionRecord | None = None,
     ) -> None:
         if slot.handle is None:
             return
@@ -1042,7 +1141,9 @@ class TauWebRuntime:
         if only_if_changed and state == slot.last_queue_state:
             return
         slot.last_queue_state = state
-        self._publish(slot, _trace_payload(slot, _queue_event_payload(slot.handle.session)))
+        self._publish(
+            slot, _trace_payload(slot, _queue_event_payload(slot.handle.session)), record=record
+        )
 
     def _stream_item(self, slot: _WebSessionSlot, payload: dict[str, object]) -> _StreamItem:
         item = _StreamItem(sequence=slot.next_sequence, payload=payload)

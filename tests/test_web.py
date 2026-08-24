@@ -1707,6 +1707,142 @@ def test_trace_buffer_drops_oldest_events_beyond_limit(tmp_path: Path) -> None:
     runtime.close()
 
 
+def test_trace_events_are_persisted_and_backfilled_across_restart(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Persisted trace session",
+        session_id="session-1",
+    )
+    provider = _StreamingFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    connection = HTTPConnection(host, port, timeout=2)
+    webtrace_path = record.path.with_name(record.path.stem + ".webtrace.jsonl")
+
+    try:
+        connection.request("GET", "/api/sessions/session-1/events")
+        response = connection.getresponse()
+        status, _payload = _post_json(
+            connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Connect the A theme"},
+        )
+        assert status == 202
+        _read_sse_events(response, until="run_finished")
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert webtrace_path.exists()
+    persisted = [
+        json.loads(line)
+        for line in webtrace_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert persisted[0]["type"] == "run_started"
+    assert persisted[-1]["type"] == "run_finished"
+    assert all("replay" not in event for event in persisted)
+
+    # —— 重启后的新 runtime 从文件回填 ——
+    restarted = TauWebRuntime(manager, lambda *args: None)  # type: ignore[arg-type]
+
+    async def collect_backfill() -> list[dict[str, Any]]:
+        _subscriber_id, subscriber = await restarted._subscribe(record.id)
+        events: list[dict[str, Any]] = []
+        while True:
+            item = subscriber.get(timeout=1)
+            if item is None:
+                break
+            events.append(item.payload)
+            if item.payload["type"] == "run_finished":
+                break
+        return events
+
+    try:
+        events = asyncio.run(collect_backfill())
+    finally:
+        restarted.close()
+    assert events[0]["type"] == "web_connected"
+    replayed = events[1:]
+    assert replayed[0]["type"] == "run_started"
+    assert replayed[-1]["type"] == "run_finished"
+    assert [event["type"] for event in replayed] == [event["type"] for event in persisted]
+
+
+def test_delete_session_removes_the_webtrace_file(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Deleted trace session",
+        session_id="session-1",
+    )
+    webtrace_path = record.path.with_name(record.path.stem + ".webtrace.jsonl")
+    webtrace_path.parent.mkdir(parents=True, exist_ok=True)
+    webtrace_path.write_text('{"type": "run_started"}\n', encoding="utf-8")
+    runtime = TauWebRuntime(manager, lambda *args: None)  # type: ignore[arg-type]
+
+    asyncio.run(runtime._delete_session(record.id))
+
+    assert not webtrace_path.exists()
+    runtime.close()
+
+
+def test_corrupt_webtrace_file_degrades_to_memory_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Corrupt trace session",
+        session_id="session-1",
+    )
+    webtrace_path = record.path.with_name(record.path.stem + ".webtrace.jsonl")
+    webtrace_path.write_text("{not json\n", encoding="utf-8")
+    runtime = TauWebRuntime(manager, lambda *args: None)  # type: ignore[arg-type]
+
+    async def subscribe_once() -> None:
+        _subscriber_id, subscriber = await runtime._subscribe(record.id)
+        item = subscriber.get(timeout=1)
+        assert item is not None
+        assert item.payload["type"] == "web_connected"
+
+    try:
+        with caplog.at_level("WARNING"):
+            asyncio.run(subscribe_once())
+        assert any("webtrace" in record.message.lower() for record in caplog.records)
+    finally:
+        runtime.close()
+
+
 def test_sse_reconnect_mid_run_receives_active_run_summary(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     cwd = tmp_path / "project"
