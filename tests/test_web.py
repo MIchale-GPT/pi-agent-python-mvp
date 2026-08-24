@@ -2762,6 +2762,75 @@ def test_delete_api_refuses_to_remove_a_running_session(tmp_path: Path) -> None:
         thread.join(timeout=2)
 
 
+def test_delete_api_refusal_keeps_the_webtrace_file_intact(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Running trace session",
+        session_id="session-1",
+    )
+    provider = _CancellableFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    command_connection = HTTPConnection(host, port, timeout=2)
+    webtrace_path = record.path.with_name(record.path.stem + ".webtrace.jsonl")
+
+    try:
+        status, _ = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Keep tracing"},
+        )
+        assert status == 202
+        assert provider.started.wait(timeout=1)
+        assert webtrace_path.exists()
+        persisted_before = webtrace_path.read_text(encoding="utf-8")
+        assert persisted_before.strip()
+
+        status, rejected = _delete_json(
+            command_connection,
+            "/api/sessions/session-1",
+            {"confirmation": "DELETE"},
+        )
+
+        assert status == 409
+        assert rejected["error"] == "session_busy"
+        assert manager.get_session(record.id) is not None
+        assert record.path.exists()
+        assert webtrace_path.exists()
+        assert webtrace_path.read_text(encoding="utf-8") == persisted_before
+
+        status, _ = _post_json(
+            command_connection,
+            "/api/sessions/session-1/cancel",
+            {},
+        )
+        assert status == 202
+    finally:
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_provider_error_is_streamed_and_finishes_the_run_as_failed(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     cwd = tmp_path / "project"

@@ -988,14 +988,14 @@ class TauWebRuntime:
 
     async def _delete_session(self, session_id: str) -> None:
         record = self._require_session(session_id)
+        slot = self._slots.get(session_id)
+        if slot is not None and slot.run_task is not None and not slot.run_task.done():
+            raise WebSessionBusyError("A running session cannot be deleted")
         webtrace = self._webtrace_path(record)
         try:
             webtrace.unlink(missing_ok=True)
         except OSError as exc:
             logger.warning("Tau Web could not remove %s: %s", webtrace, exc)
-        slot = self._slots.get(session_id)
-        if slot is not None and slot.run_task is not None and not slot.run_task.done():
-            raise WebSessionBusyError("A running session cannot be deleted")
         if slot is not None:
             for subscriber in slot.subscribers.values():
                 _replace_subscriber_items(subscriber, None)
