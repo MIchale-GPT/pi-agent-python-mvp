@@ -65,6 +65,8 @@ For the practical frontend contract, see [Building a Custom TUI](../custom-tui.m
 - [Phase 24: Session Tree Branching](./phase-24-session-tree-branching.md)
 - [Tau Web live session adapter](./tau-web-live-session-adapter.md)
 - [Tau Web P1 agent controls](./tau-web-agent-controls.md)
+- [Phase 26: Evidence-bound DWS data-query extension](./phase-26-data-query-extension.md)
+- [SAG Agent contract readiness](../sag-agent-contract-readiness.md)
 
 Phase 21 extensions are implemented; see the phase note and the user guide at
 `website/content/guides/extensions.md`.

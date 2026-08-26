@@ -1,0 +1,7 @@
+[project]
+name = "tau-data-query"
+version = "0.1.0"
+description = "Evidence-bound DWS read-only data-query extension (bundled with Tau)."
+
+[tool.tau]
+extensions = ["extension.py"]

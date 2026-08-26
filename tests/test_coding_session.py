@@ -207,7 +207,10 @@ class CancellableWaitingProvider:
 
 
 @pytest.mark.anyio
-async def test_load_empty_session_defers_transcript_file(tmp_path: Path) -> None:
+async def test_load_empty_session_defers_transcript_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolate_home(monkeypatch, tmp_path)
     storage = JsonlSessionStorage(tmp_path / "session.jsonl")
 
     session = await CodingSession.load(_config(tmp_path, FakeProvider([]), storage))

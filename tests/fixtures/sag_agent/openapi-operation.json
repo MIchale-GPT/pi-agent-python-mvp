@@ -1,0 +1,58 @@
+{
+  "method": "POST",
+  "openapi": "3.1.0",
+  "operation": {
+    "operationId": "<redacted:operationId>",
+    "parameters": [
+      {
+        "in": "path",
+        "name": "<redacted:name>",
+        "required": true,
+        "schema": {
+          "title": "<redacted:title>",
+          "type": "string"
+        }
+      }
+    ],
+    "requestBody": {
+      "content": {
+        "application/json": {
+          "schema": {
+            "$ref": "#/components/schemas/ChatCompletionRequest"
+          }
+        }
+      },
+      "required": true
+    },
+    "responses": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {}
+          }
+        },
+        "description": "<redacted:description>"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "<redacted:description>"
+      }
+    },
+    "security": [
+      {
+        "HTTPBearer": []
+      }
+    ],
+    "summary": "<redacted:summary>",
+    "tags": [
+      "<redacted:tags>"
+    ]
+  },
+  "path": "/api/v1/openai/{agent_id}/chat/completions"
+}

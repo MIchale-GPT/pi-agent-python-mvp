@@ -124,6 +124,10 @@
                   <svg><use href="#i-settings"></use></svg>
                   模型与 Thinking
                 </button>
+                <button id="dataquery-settings-button" type="button">
+                  <svg><use href="#i-database"></use></svg>
+                  数据库连接
+                </button>
                 <button id="rename-session-button" type="button" disabled>
                   <svg><use href="#i-edit"></use></svg>
                   重命名
@@ -299,6 +303,187 @@
           <button class="secondary-button dialog-cancel" type="button">取消</button>
           <button id="session-settings-submit" class="primary-button" type="submit">
             应用到当前会话
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="dataquery-settings-dialog" class="modal">
+      <form id="dataquery-settings-form" class="modal-card compact">
+        <header class="modal-header">
+          <div>
+            <p class="eyebrow">DATA QUERY</p>
+            <h2>数据库连接（只读查询）</h2>
+          </div>
+          <button class="icon-button dialog-close" type="button" aria-label="关闭">
+            <svg><use href="#i-close"></use></svg>
+          </button>
+        </header>
+        <div class="modal-body">
+          <div class="field-grid">
+            <label class="field">
+              <span>DWS 主机</span>
+              <input id="dataquery-host" type="text" autocomplete="off" />
+              <small class="source-hint"></small>
+            </label>
+            <label class="field">
+              <span>端口</span>
+              <input id="dataquery-port" type="number" min="1" max="65535" />
+              <small class="source-hint"></small>
+            </label>
+          </div>
+          <div class="field-grid">
+            <label class="field">
+              <span>数据库</span>
+              <input id="dataquery-database" type="text" autocomplete="off" />
+              <small class="source-hint"></small>
+            </label>
+            <label class="field">
+              <span>账号</span>
+              <input id="dataquery-username" type="text" autocomplete="off" />
+              <small class="source-hint"></small>
+            </label>
+          </div>
+          <label class="field">
+            <span>密码（留空表示保持不变）</span>
+            <input
+              id="dataquery-password"
+              type="password"
+              autocomplete="new-password"
+              placeholder="未配置"
+            />
+            <small id="dataquery-password-help">密码只写不读；保存后无法在界面中查看。</small>
+          </label>
+          <div class="field-grid">
+            <label class="field">
+              <span>SSL 模式</span>
+              <select id="dataquery-sslmode">
+                <option value="prefer">prefer</option>
+                <option value="require">require</option>
+                <option value="verify-ca">verify-ca</option>
+                <option value="verify-full">verify-full</option>
+                <option value="disable">disable</option>
+              </select>
+              <small class="source-hint"></small>
+            </label>
+            <label class="field">
+              <span>查询超时（秒）</span>
+              <input id="dataquery-timeout" type="number" min="1" />
+              <small class="source-hint"></small>
+            </label>
+          </div>
+          <div class="field-grid">
+            <label class="field">
+              <span>最大返回行数</span>
+              <input id="dataquery-max-rows" type="number" min="1" />
+              <small class="source-hint"></small>
+            </label>
+            <label class="field">
+              <span>SQL 规划模式</span>
+              <select id="dataquery-planning-mode">
+                <option value="unconfigured">未配置</option>
+                <option value="agent">SAG Agent</option>
+                <option value="legacy">Legacy MCP</option>
+              </select>
+              <small class="source-hint"></small>
+            </label>
+          </div>
+          <div id="dataquery-agent-fields" hidden>
+            <div class="field-grid">
+              <label class="field">
+                <span>SAG Agent API Origin</span>
+                <input
+                  id="dataquery-sag-agent-origin"
+                  type="url"
+                  autocomplete="off"
+                  placeholder="http://localhost:8100"
+                />
+                <small class="source-hint"></small>
+              </label>
+              <label class="field">
+                <span>SAG Agent ID</span>
+                <input id="dataquery-sag-agent-id" type="text" autocomplete="off" />
+                <small class="source-hint"></small>
+              </label>
+            </div>
+            <div class="field-grid">
+              <label class="field">
+                <span>Agent 超时（秒）</span>
+                <input id="dataquery-sag-agent-timeout" type="number" min="1" max="300" />
+                <small class="source-hint"></small>
+              </label>
+              <label class="field">
+                <span>回答上限（字节）</span>
+                <input id="dataquery-sag-agent-answer-bytes" type="number" min="1" max="65536" />
+                <small class="source-hint"></small>
+              </label>
+            </div>
+            <div class="field-grid">
+              <label class="field">
+                <span>最多引用数</span>
+                <input id="dataquery-sag-citation-limit" type="number" min="1" max="5" />
+                <small class="source-hint"></small>
+              </label>
+              <label class="field">
+                <span>单条引用上限（字节）</span>
+                <input
+                  id="dataquery-sag-citation-snippet-bytes"
+                  type="number"
+                  min="1"
+                  max="8192"
+                />
+                <small class="source-hint"></small>
+              </label>
+            </div>
+            <div class="field-grid">
+              <label class="field">
+                <span>规划会话上限（字节）</span>
+                <input
+                  id="dataquery-sag-transcript-bytes"
+                  type="number"
+                  min="1"
+                  max="262144"
+                />
+                <small class="source-hint"></small>
+              </label>
+            </div>
+          </div>
+          <div id="dataquery-mcp-fields" hidden>
+            <div class="field-grid">
+              <label class="field">
+                <span id="dataquery-sag-endpoint-label">SAG MCP 端点</span>
+                <input id="dataquery-sag-endpoint" type="url" autocomplete="off" />
+                <small class="source-hint"></small>
+              </label>
+              <label class="field">
+                <span>SAG MCP 知识源 ID</span>
+                <input id="dataquery-sag-source" type="text" autocomplete="off" />
+                <small class="source-hint"></small>
+              </label>
+            </div>
+          </div>
+          <label class="field">
+            <span>SAG Token（留空表示保持不变）</span>
+            <input
+              id="dataquery-sag-token"
+              type="password"
+              autocomplete="new-password"
+              placeholder="未配置"
+            />
+            <small>Token 只写不读，Agent 与 legacy MCP 共用。</small>
+          </label>
+          <p id="dataquery-config-diagnostics" class="form-status" role="status" hidden></p>
+          <p id="dataquery-test-status" class="form-status" role="status" hidden></p>
+          <p id="dataquery-settings-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <footer class="modal-actions">
+          <button id="dataquery-test-button" class="secondary-button" type="button">
+            测试连接
+          </button>
+          <span class="spacer"></span>
+          <button class="secondary-button dialog-cancel" type="button">取消</button>
+          <button id="dataquery-settings-submit" class="primary-button" type="submit">
+            保存
           </button>
         </footer>
       </form>
@@ -567,6 +752,11 @@
       <symbol id="i-lock" viewBox="0 0 24 24">
         <rect x="5" y="10" width="14" height="10" rx="2" />
         <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+      </symbol>
+      <symbol id="i-database" viewBox="0 0 24 24">
+        <ellipse cx="12" cy="5" rx="8" ry="3" />
+        <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
+        <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
       </symbol>
       <symbol id="i-send" viewBox="0 0 24 24">
         <path d="m4 4 17 8-17 8 3-8zM7 12h14" />

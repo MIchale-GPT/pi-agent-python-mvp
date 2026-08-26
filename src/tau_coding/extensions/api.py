@@ -97,6 +97,11 @@ CustomMessageMarkup = Callable[[str, str, "Mapping[str, JSONValue] | None", bool
 # resolver, never raised into the frontend.
 ToolCallMarkup = Callable[[str, "Mapping[str, JSONValue]"], "str | None"]
 
+# Extension-provided enrichment for a host confirmation dialog: given the
+# model-supplied tool arguments, return display-only JSON (e.g. the frozen SQL
+# behind a plan id). Errors and non-mapping results fall back to generic args.
+AuthorizationView = Callable[[Mapping[str, JSONValue]], "Mapping[str, JSONValue] | None"]
+
 # Host-side resolver installed into render paths: given the tool name, its
 # result, and whether the row is expanded, return the display markup from the tool's
 # `render_result` or ``None`` to fall back to the generic result block. Errors
@@ -898,6 +903,23 @@ class ExtensionAPI:
         """
         self._generation.assert_active()
         self._runtime.register_prompt_guideline(self._extension_name, guideline)
+
+    def register_diagnostic(self, message: str, *, severity: str = "warning") -> None:
+        """Record a non-fatal diagnostic surfaced with the session diagnostics."""
+        self._generation.assert_active()
+        self._runtime.register_diagnostic(self._extension_name, message, severity=severity)
+
+    def register_authorization_view(self, tool_name: str, view: AuthorizationView) -> None:
+        """Provide an enrichment payload for a tool's host confirmation dialog.
+
+        The host shows the returned mapping (e.g. the frozen SQL of a query
+        plan) when requesting confirmation. Views must never echo secrets or
+        model-controlled display text verbatim; they are an isolation boundary
+        and any error or non-mapping result silently falls back to generic
+        arguments.
+        """
+        self._generation.assert_active()
+        self._runtime.register_authorization_view(self._extension_name, tool_name, view)
 
     def on(
         self,

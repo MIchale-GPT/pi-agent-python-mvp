@@ -1787,6 +1787,37 @@ kbd {
   line-height: 1.5;
 }
 
+.form-status {
+  margin: -3px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(120, 160, 255, 0.07);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.form-status[data-kind="ok"] {
+  border-color: rgba(126, 217, 150, 0.4);
+  background: rgba(50, 170, 90, 0.09);
+  color: #7ddba0;
+}
+
+.form-status[data-kind="warn"] {
+  border-color: rgba(238, 190, 90, 0.4);
+  background: rgba(180, 130, 40, 0.1);
+  color: #ecd394;
+}
+
+.source-hint {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.modal-actions .spacer {
+  flex: 1;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

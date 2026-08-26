@@ -115,6 +115,13 @@ message blocks use the same theme background as the prompt field and sidebar,
 with light vertical padding so they read as blocks rather than highlighted lines.
 This visually ties submitted prompts to the composer.
 
+For Agent-mode data queries, the collapsed `data_knowledge_search` result shows
+the SAG planning attempt and citation count. **Ctrl+O** expands the actual
+bounded Tau→SAG request, SAG→Tau response, citations, and whether each citation
+can be expanded. These display-only details are persisted with the tool result,
+so the same card is available after `/resume`; tokens, passwords, and bound SQL
+parameter values are excluded.
+
 ## Long sessions
 
 Tau keeps long transcripts responsive by mounting only a window of messages in

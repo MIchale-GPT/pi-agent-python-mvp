@@ -1,0 +1,14 @@
+{
+  "authorization": "Bearer <redacted>",
+  "body": {
+    "messages": [
+      {
+        "content": "<redacted:content>",
+        "role": "user"
+      }
+    ],
+    "stream": false
+  },
+  "method": "POST",
+  "path": "/api/v1/openai/{agent_id}/chat/completions"
+}

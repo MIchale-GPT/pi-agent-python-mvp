@@ -56,11 +56,13 @@ from tau_coding.context_window import (
     summarize_messages_for_compaction,
 )
 from tau_coding.credentials import FileCredentialStore, credentials_path
+from tau_coding.dataquery.config import dataquery_bundled_extension_path
 from tau_coding.diagnostics import (
     AgentCallDiagnosticContext,
     AgentCallDiagnosticLogger,
     new_agent_call_run_id,
 )
+from tau_coding.env import load_env_file
 from tau_coding.events import (
     AgentSettledEvent,
     AutoRetryEndEvent,
@@ -335,6 +337,8 @@ class CodingSession:
             skills_enabled=config.skills_enabled,
         )
 
+        load_env_file(config.cwd)
+
         extension_runtime = config.extension_runtime
         fresh_extension_runtime = extension_runtime is None
         if extension_runtime is None:
@@ -342,7 +346,7 @@ class CodingSession:
             if config.extensions_enabled or config.extension_paths:
                 extension_runtime.load(
                     resource_paths,
-                    extra_paths=config.extension_paths,
+                    extra_paths=_dataquery_extra_paths(config),
                     include_resource_dirs=config.extensions_enabled,
                     include_project_dir=config.project_extensions_enabled,
                 )
@@ -1322,7 +1326,7 @@ class CodingSession:
         if self._config.extensions_enabled or self._config.extension_paths:
             self._extension_runtime.load(
                 self._resource_paths,
-                extra_paths=self._config.extension_paths,
+                extra_paths=_dataquery_extra_paths(self._config),
                 include_resource_dirs=self._config.extensions_enabled,
                 include_project_dir=self._config.project_extensions_enabled,
             )
@@ -2733,6 +2737,28 @@ def _system_prompt_resource_signatures(
         for skill in sorted(skills, key=lambda item: item.name)
     )
     return (prompt_skills, _context_file_signatures(context_files))
+
+
+def _dataquery_extra_paths(config: object) -> tuple[Path, ...]:
+    """Return extension paths, adding the bundled data-query extension.
+
+    The bundled extension is only included once the user begins configuring
+    data queries (decision 20), so unconfigured sessions behave exactly as
+    before and no diagnostics are emitted.
+    """
+    paths = tuple(getattr(config, "extension_paths", ()) or ())
+    if not getattr(config, "extensions_enabled", False):
+        return paths
+    resource_paths = getattr(config, "resource_paths", None)
+    tau_paths = getattr(resource_paths, "paths", None)
+    if tau_paths is None and resource_paths is not None:
+        root = getattr(resource_paths, "root", None)
+        if root is not None:
+            tau_paths = TauPaths(home=root)
+    bundled = dataquery_bundled_extension_path(tau_paths)
+    if bundled is not None:
+        paths = (*paths, bundled)
+    return paths
 
 
 def _load_session_resources(

@@ -76,6 +76,12 @@ const sessionModel = document.querySelector("#session-model");
 const sessionThinking = document.querySelector("#session-thinking");
 const sessionThinkingHelp = document.querySelector("#session-thinking-help");
 const sessionSettingsSubmit = document.querySelector("#session-settings-submit");
+const dataquerySettingsButton = document.querySelector("#dataquery-settings-button");
+const dataquerySettingsDialog = document.querySelector("#dataquery-settings-dialog");
+const dataquerySettingsForm = document.querySelector("#dataquery-settings-form");
+const dataquerySettingsSubmit = document.querySelector("#dataquery-settings-submit");
+const dataqueryTestButton = document.querySelector("#dataquery-test-button");
+const dataqueryTestStatus = document.querySelector("#dataquery-test-status");
 const toolAuthorizationDialog = document.querySelector("#tool-authorization-dialog");
 const toolAuthorizationName = document.querySelector("#tool-authorization-name");
 const toolAuthorizationArguments = document.querySelector(
@@ -958,6 +964,14 @@ function setFormError(id, message = "") {
   error.hidden = !message;
 }
 
+function setFormStatus(id, message = "", hidden = false, kind = "") {
+  const status = document.querySelector(id);
+  if (!status) return;
+  status.textContent = message;
+  status.hidden = hidden;
+  status.dataset.kind = kind;
+}
+
 function selectedTemperatureCapability() {
   const provider = state.sessionOptions?.provider;
   const range = provider?.temperatureRange || { min: 0, max: 2, step: "any" };
@@ -1209,6 +1223,180 @@ sessionSettingsForm.addEventListener("submit", async (event) => {
   }
 });
 
+// -- 数据库连接（只读查询）设置 ------------------------------------------------
+
+const dataqueryFieldIds = {
+  host: "#dataquery-host",
+  port: "#dataquery-port",
+  database: "#dataquery-database",
+  username: "#dataquery-username",
+  sslmode: "#dataquery-sslmode",
+  query_timeout_seconds: "#dataquery-timeout",
+  max_rows: "#dataquery-max-rows",
+  planning_mode: "#dataquery-planning-mode",
+  sag_agent_origin: "#dataquery-sag-agent-origin",
+  sag_agent_id: "#dataquery-sag-agent-id",
+  sag_agent_timeout_seconds: "#dataquery-sag-agent-timeout",
+  sag_agent_answer_max_bytes: "#dataquery-sag-agent-answer-bytes",
+  sag_citation_limit: "#dataquery-sag-citation-limit",
+  sag_citation_snippet_max_bytes: "#dataquery-sag-citation-snippet-bytes",
+  sag_planner_transcript_max_bytes: "#dataquery-sag-transcript-bytes",
+  sag_endpoint: "#dataquery-sag-endpoint",
+  sag_source_id: "#dataquery-sag-source",
+};
+
+function syncDataqueryModeFields() {
+  const mode = document.querySelector("#dataquery-planning-mode").value;
+  document.querySelector("#dataquery-agent-fields").hidden = mode !== "agent";
+  document.querySelector("#dataquery-mcp-fields").hidden = mode === "unconfigured";
+  document.querySelector("#dataquery-sag-endpoint-label").textContent =
+    mode === "agent" ? "SAG MCP 端点（引用展开，可选）" : "SAG MCP 端点";
+}
+
+function setDataquerySourceHint(field, source) {
+  const input = document.querySelector(dataqueryFieldIds[field]);
+  const hint = input?.closest(".field")?.querySelector(".source-hint");
+  if (!hint) return;
+  const labels = { env: "环境变量（只读）", config: "已保存", default: "默认值" };
+  hint.textContent = labels[source] || "";
+  if (input) input.disabled = source === "env";
+}
+
+async function loadDataquerySettings() {
+  const response = await fetch("/api/dataquery", {
+    headers: { Accept: "application/json", "X-Tau-Web": "1" },
+  });
+  if (!response.ok) throw new Error("读取数据库连接配置失败");
+  const payload = await response.json();
+  for (const [field, selector] of Object.entries(dataqueryFieldIds)) {
+    const entry = payload.fields?.[field];
+    const input = document.querySelector(selector);
+    if (input && entry) {
+      input.value = Array.isArray(entry.value) ? entry.value.join(", ") : (entry.value ?? "");
+      setDataquerySourceHint(field, entry.source);
+    }
+  }
+  syncDataqueryModeFields();
+  const password = document.querySelector("#dataquery-password");
+  const token = document.querySelector("#dataquery-sag-token");
+  password.value = "";
+  password.placeholder = payload.passwordConfigured
+    ? "已配置（留空保持不变）"
+    : "未配置";
+  token.value = "";
+  token.placeholder = payload.sagTokenConfigured
+    ? "已配置（留空保持不变）"
+    : "未配置";
+  const diagnostics = payload.configurationDiagnostics || [];
+  setFormStatus(
+    "#dataquery-config-diagnostics",
+    diagnostics.map((item) => item.message).join(" · "),
+    diagnostics.length === 0,
+    diagnostics.length === 0 ? "ok" : "warn",
+  );
+  return payload;
+}
+
+document
+  .querySelector("#dataquery-planning-mode")
+  .addEventListener("change", syncDataqueryModeFields);
+
+dataquerySettingsButton.addEventListener("click", async () => {
+  sessionMenu.removeAttribute("open");
+  setFormError("#dataquery-settings-error");
+  setFormStatus("#dataquery-test-status", "", true);
+  dataquerySettingsSubmit.disabled = false;
+  dataqueryTestButton.disabled = false;
+  try {
+    await loadDataquerySettings();
+  } catch (error) {
+    setFormError("#dataquery-settings-error", error.message);
+  }
+  dataquerySettingsDialog.showModal();
+});
+
+dataquerySettingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (dataquerySettingsSubmit.disabled) return;
+  dataquerySettingsSubmit.disabled = true;
+  setFormError("#dataquery-settings-error");
+  setFormStatus("#dataquery-test-status", "", true);
+  try {
+    const readNumber = (id) => {
+      const value = Number(document.querySelector(id).value);
+      return Number.isFinite(value) && value > 0 ? value : undefined;
+    };
+    const readList = (id) =>
+      document
+        .querySelector(id)
+        .value.split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+    await postJson("/api/dataquery", {
+      host: document.querySelector("#dataquery-host").value,
+      port: readNumber("#dataquery-port"),
+      database: document.querySelector("#dataquery-database").value,
+      username: document.querySelector("#dataquery-username").value,
+      sslmode: document.querySelector("#dataquery-sslmode").value,
+      query_timeout_seconds: readNumber("#dataquery-timeout"),
+      max_rows: readNumber("#dataquery-max-rows"),
+      planning_mode: document.querySelector("#dataquery-planning-mode").value,
+      sag_agent_origin: document.querySelector("#dataquery-sag-agent-origin").value,
+      sag_agent_id: document.querySelector("#dataquery-sag-agent-id").value,
+      sag_agent_timeout_seconds: readNumber("#dataquery-sag-agent-timeout"),
+      sag_agent_answer_max_bytes: readNumber("#dataquery-sag-agent-answer-bytes"),
+      sag_citation_limit: readNumber("#dataquery-sag-citation-limit"),
+      sag_citation_snippet_max_bytes: readNumber("#dataquery-sag-citation-snippet-bytes"),
+      sag_planner_transcript_max_bytes: readNumber("#dataquery-sag-transcript-bytes"),
+      sag_endpoint: document.querySelector("#dataquery-sag-endpoint").value,
+      sag_source_id: document.querySelector("#dataquery-sag-source").value,
+      password: document.querySelector("#dataquery-password").value,
+      sagToken: document.querySelector("#dataquery-sag-token").value,
+    });
+    dataquerySettingsDialog.close();
+    showToast("数据库连接已保存：新建会话或 /reload 后生效");
+  } catch (error) {
+    setFormError("#dataquery-settings-error", error.message);
+  } finally {
+    dataquerySettingsSubmit.disabled = false;
+  }
+});
+
+dataqueryTestButton.addEventListener("click", async () => {
+  if (dataqueryTestButton.disabled) return;
+  dataqueryTestButton.disabled = true;
+  dataqueryTestButton.textContent = "测试中…";
+  setFormStatus("#dataquery-test-status", "", true);
+  try {
+    const payload = await postJson("/api/dataquery/test", {});
+    const dws = payload.dws || {};
+    const planner = payload.planner || {};
+    const citationExpansion = payload.citationExpansion || {};
+    const dwsLine = dws.ok
+      ? `DWS 连接成功（${dws.elapsedMs}ms）`
+      : `DWS：${dws.error || "失败"}`;
+    const plannerLine = planner.ok
+      ? `${planner.mode === "legacy" ? "Legacy MCP" : "SAG Agent"} 规划连接成功（${planner.elapsedMs}ms）`
+      : `规划器：${planner.error || "失败"}`;
+    const citationLine = citationExpansion.configured
+      ? citationExpansion.ok
+        ? `引用展开连接成功（${citationExpansion.elapsedMs}ms）`
+        : `引用展开：${citationExpansion.error || "失败"}`
+      : "引用展开：未配置（可选）";
+    setFormStatus(
+      "#dataquery-test-status",
+      `${dwsLine} · ${plannerLine} · ${citationLine}`,
+      false,
+      dws.ok && planner.ok ? "ok" : "warn",
+    );
+  } catch (error) {
+    setFormError("#dataquery-settings-error", error.message);
+  } finally {
+    dataqueryTestButton.disabled = false;
+    dataqueryTestButton.textContent = "测试连接";
+  }
+});
+
 newSessionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const cwd = newSessionCwd.value.trim();
@@ -1392,7 +1580,7 @@ deleteSessionForm.addEventListener("submit", async (event) => {
   });
 });
 
-[newSessionDialog, sessionSettingsDialog, renameSessionDialog, deleteSessionDialog].forEach(
+[newSessionDialog, sessionSettingsDialog, dataquerySettingsDialog, renameSessionDialog, deleteSessionDialog].forEach(
   (dialog) => {
   dialog.querySelectorAll(".dialog-close, .dialog-cancel").forEach((button) => {
     button.addEventListener("click", () => dialog.close());

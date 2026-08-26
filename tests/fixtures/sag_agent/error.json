@@ -1,0 +1,14 @@
+{
+  "body": {
+    "error": {
+      "code": "unauthorized",
+      "layer": "api",
+      "message": "<redacted:message>",
+      "request_id": "<redacted:request_id>",
+      "retryable": false,
+      "stage": "auth"
+    }
+  },
+  "contentType": "application/json",
+  "status": 401
+}

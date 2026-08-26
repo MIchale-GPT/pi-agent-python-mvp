@@ -11,9 +11,10 @@ import os
 import queue
 import sys
 import threading
+import time
 import webbrowser
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -46,6 +47,7 @@ from tau_agent.session import (
 )
 from tau_coding.credentials import FileCredentialStore, credentials_path
 from tau_coding.events import CodingSessionEvent
+from tau_coding.extensions.api import NullUiBridge
 from tau_coding.provider_config import (
     MAX_TEMPERATURE,
     MIN_TEMPERATURE,
@@ -188,6 +190,26 @@ class _PendingToolAuthorization:
     decision: asyncio.Future[ToolAuthorizationDecision]
 
 
+# Read-only knowledge and preparation steps never prompt a browser dialog
+# (decision 16); only data_query_execute is host-confirmed.
+_DATAQUERY_AUTO_APPROVED_TOOLS = frozenset(
+    {"data_knowledge_search", "data_knowledge_read", "data_query_prepare"}
+)
+
+
+class _WebConfirmingUiBridge(NullUiBridge):
+    """Web host UI bridge: the browser dialog is the single authorizer.
+
+    Extension dialogs resolve to their no-op defaults except ``confirm``,
+    which returns True so an extension's inline confirmation never double-gates
+    after the host's ``before_tool_call`` dialog (decision 16).
+    """
+
+    async def confirm(self, title: str, message: str, *, timeout: float | None = None) -> bool:
+        del title, message, timeout
+        return True
+
+
 @dataclass(slots=True)
 class _WebSessionSlot:
     handle: WebSessionHandle | None = None
@@ -302,6 +324,18 @@ class TauWebRuntime:
     def session_options(self) -> dict[str, object]:
         """Read the configured project, provider, and model choices."""
         return self._call(self._session_options())
+
+    def dataquery_config(self) -> dict[str, object]:
+        """Read the data-query configuration (no secret values)."""
+        return self._call(self._dataquery_config())
+
+    def dataquery_update(self, payload: Mapping[str, object]) -> dict[str, object]:
+        """Apply a data-query configuration update."""
+        return self._call(self._dataquery_update(payload))
+
+    def dataquery_test_connection(self) -> dict[str, object]:
+        """Probe DWS and SAG connectivity on the runtime thread."""
+        return self._call(self._dataquery_test_connection())
 
     def create_session(
         self,
@@ -550,6 +584,9 @@ class TauWebRuntime:
         handle.session.set_before_tool_call(
             lambda call: self._authorize_tool_call(record.id, slot, call)
         )
+        # The browser authorization dialog is the single gate in Web (decision
+        # 16); the extension's inline confirm must pass after the host approves.
+        handle.session.extension_runtime.set_ui_bridge(_WebConfirmingUiBridge())
         slot.handle = handle
         return handle
 
@@ -728,6 +765,11 @@ class TauWebRuntime:
         if not slot.subscribers:
             return True, "Tool execution denied because no Tau Web client is connected"
 
+        # Read-only knowledge and plan-preparation tools run without a browser
+        # confirmation; only execute prompts the dialog (decision 16).
+        if call.name in _DATAQUERY_AUTO_APPROVED_TOOLS:
+            return False, None
+
         request_id = uuid4().hex
         pending = _PendingToolAuthorization(
             request_id=request_id,
@@ -735,9 +777,14 @@ class TauWebRuntime:
             decision=self._loop.create_future(),
         )
         slot.pending_tool_authorizations[request_id] = pending
-        self._publish(
-            slot, _trace_payload(slot, _tool_authorization_event_payload(pending)), record=record
-        )
+        payload = _tool_authorization_event_payload(pending)
+        if call.name == "data_query_execute" and slot.handle is not None:
+            view = slot.handle.session.extension_runtime.authorization_view(
+                call.name, call.arguments
+            )
+            if view:
+                payload = {**payload, "dataQuery": view}
+        self._publish(slot, _trace_payload(slot, payload), record=record)
         try:
             decision = await asyncio.wait_for(
                 pending.decision,
@@ -818,6 +865,195 @@ class TauWebRuntime:
 
     async def _session_list(self) -> dict[str, object]:
         return session_list_payload(self._manager)
+
+    async def _dataquery_config(self) -> dict[str, object]:
+        """Return the read-only data-query configuration payload (decision 13)."""
+        from tau_coding.dataquery.config import config_api_payload
+
+        return config_api_payload(self._manager.paths)
+
+    async def _dataquery_update(self, payload: Mapping[str, object]) -> dict[str, object]:
+        """Apply a data-query configuration update and return the read payload."""
+        from tau_coding.dataquery.config import (
+            DataQueryConfigError,
+            apply_config_api_update,
+        )
+
+        try:
+            return apply_config_api_update(payload, self._manager.paths)
+        except DataQueryConfigError as exc:
+            raise WebSessionValidationError("dataquery_config_invalid", str(exc)) from exc
+
+    async def _dataquery_test_connection(self) -> dict[str, object]:
+        """Probe DWS and SAG connectivity with sanitized results (decision 15)."""
+        from tau_coding.dataquery.config import resolve_data_query_config
+
+        resolved = resolve_data_query_config(self._manager.paths)
+        dws: dict[str, object] = {"ok": False, "elapsedMs": 0, "error": None}
+        planner: dict[str, object] = {
+            "mode": resolved.planning_mode,
+            "ok": False,
+            "elapsedMs": 0,
+            "error": None,
+        }
+        citation_expansion: dict[str, object] = {
+            "configured": False,
+            "ok": False,
+            "elapsedMs": 0,
+            "error": None,
+        }
+
+        if resolved.complete:
+            from tau_coding.dataquery.backends.dws import DwsPostgresQueryBackend
+            from tau_coding.dataquery.backends.sag import SagMcpKnowledgeBackend
+
+            backend = DwsPostgresQueryBackend(
+                host=resolved.host,
+                port=resolved.port,
+                database=resolved.database,
+                username=resolved.username,
+                password=resolved.secrets.dws_password or "",
+                sslmode=resolved.sslmode,
+                connect_timeout=resolved.dws_connect_timeout,
+                probe_query=resolved.dws_probe_query,
+            )
+            elapsed, error = await backend.test_connection()
+            await backend.close()
+            dws = {"ok": error is None, "elapsedMs": elapsed, "error": error}
+
+            if resolved.planning_mode == "legacy":
+                knowledge = SagMcpKnowledgeBackend(
+                    endpoint=resolved.sag_endpoint,
+                    token=resolved.secrets.sag_token or "",
+                    source_id=resolved.sag_source_id,
+                    search_tool=resolved.sag_search_tool,
+                    read_tool=resolved.sag_read_tool,
+                    arg_query=resolved.sag_arg_query,
+                    arg_source=resolved.sag_arg_source,
+                    arg_document=resolved.sag_arg_document,
+                    timeout_seconds=resolved.sag_rpc_timeout_seconds,
+                    protocol_version=resolved.sag_protocol_version,
+                    probe_query=resolved.sag_probe_query,
+                    search_summary_max_bytes=resolved.sag_search_summary_max_bytes,
+                )
+                started = time.monotonic()
+                try:
+                    await knowledge.test()
+                    elapsed_ms = int((time.monotonic() - started) * 1000)
+                    planner = {
+                        "mode": "legacy",
+                        "ok": True,
+                        "elapsedMs": elapsed_ms,
+                        "error": None,
+                    }
+                    citation_expansion = {
+                        "configured": True,
+                        "ok": True,
+                        "elapsedMs": elapsed_ms,
+                        "error": None,
+                    }
+                except Exception as exc:  # noqa: BLE001 - sanitized probe result
+                    elapsed_ms = int((time.monotonic() - started) * 1000)
+                    error = str(exc) or type(exc).__name__
+                    planner = {
+                        "mode": "legacy",
+                        "ok": False,
+                        "elapsedMs": elapsed_ms,
+                        "error": error,
+                    }
+                    citation_expansion = {
+                        "configured": True,
+                        "ok": False,
+                        "elapsedMs": elapsed_ms,
+                        "error": error,
+                    }
+                finally:
+                    await knowledge.close()
+            else:
+                from tau_coding.dataquery.backends.sag_agent import SagAgentSqlPlanner
+
+                agent_planner = SagAgentSqlPlanner(
+                    origin=resolved.sag_agent_origin,
+                    agent_id=resolved.sag_agent_id,
+                    token=resolved.secrets.sag_token or "",
+                    timeout_seconds=resolved.sag_agent_timeout_seconds,
+                    max_response_bytes=resolved.sag_planner_transcript_max_bytes,
+                )
+                started = time.monotonic()
+                try:
+                    await agent_planner.test()
+                    planner = {
+                        "mode": "agent",
+                        "ok": True,
+                        "elapsedMs": int((time.monotonic() - started) * 1000),
+                        "error": None,
+                    }
+                except Exception as exc:  # noqa: BLE001 - adapter returns bounded errors
+                    planner = {
+                        "mode": "agent",
+                        "ok": False,
+                        "elapsedMs": int((time.monotonic() - started) * 1000),
+                        "error": str(exc) or type(exc).__name__,
+                    }
+                finally:
+                    await agent_planner.close()
+
+                if resolved.sag_endpoint:
+                    knowledge = SagMcpKnowledgeBackend(
+                        endpoint=resolved.sag_endpoint,
+                        token=resolved.secrets.sag_token or "",
+                        source_id=resolved.sag_source_id,
+                        search_tool=resolved.sag_search_tool,
+                        read_tool=resolved.sag_read_tool,
+                        arg_query=resolved.sag_arg_query,
+                        arg_source=resolved.sag_arg_source,
+                        arg_document=resolved.sag_arg_document,
+                        timeout_seconds=resolved.sag_rpc_timeout_seconds,
+                        protocol_version=resolved.sag_protocol_version,
+                        probe_query=resolved.sag_probe_query,
+                        search_summary_max_bytes=resolved.sag_search_summary_max_bytes,
+                    )
+                    started = time.monotonic()
+                    try:
+                        await knowledge.test()
+                        citation_expansion = {
+                            "configured": True,
+                            "ok": True,
+                            "elapsedMs": int((time.monotonic() - started) * 1000),
+                            "error": None,
+                        }
+                    except Exception as exc:  # noqa: BLE001 - bounded probe result
+                        citation_expansion = {
+                            "configured": True,
+                            "ok": False,
+                            "elapsedMs": int((time.monotonic() - started) * 1000),
+                            "error": str(exc) or type(exc).__name__,
+                        }
+                    finally:
+                        await knowledge.close()
+                else:
+                    citation_expansion["error"] = "not configured"
+        else:
+            missing: list[str] = []
+            if not resolved.username:
+                missing.append("dws username")
+            if not resolved.secrets.dws_password:
+                missing.append("dws password")
+            if not resolved.secrets.sag_token:
+                missing.append("sag token")
+            dws["error"] = "not configured"
+            planner["error"] = "not configured"
+            citation_expansion["error"] = "not configured"
+            dws["missing"] = missing
+
+        return {
+            "dws": dws,
+            "planner": planner,
+            "citationExpansion": citation_expansion,
+            "planningMode": resolved.planning_mode,
+            "configurationDiagnostics": list(resolved.configuration_diagnostics),
+            "complete": resolved.complete,
+        }
 
     async def _session_detail(self, session_id: str) -> dict[str, object] | None:
         payload = session_detail_payload(self._manager, session_id)
@@ -1561,6 +1797,17 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(payload)
             return
+        if path == "/api/dataquery":
+            try:
+                payload = self._tau_server.web_runtime.dataquery_config()
+            except (FutureTimeoutError, OSError, RuntimeError, ValueError):
+                self._send_json(
+                    {"error": "dataquery_config_unavailable"},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return
+            self._send_json(payload)
+            return
         if path.startswith("/api/sessions/"):
             session_path = path.removeprefix("/api/sessions/")
             if session_path.endswith("/events"):
@@ -1596,6 +1843,12 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
         path = unquote(urlsplit(self.path).path)
         if path == "/api/provider":
             self._update_provider()
+            return
+        if path == "/api/dataquery":
+            self._update_dataquery_config()
+            return
+        if path == "/api/dataquery/test":
+            self._test_dataquery_connection()
             return
         if path == "/api/sessions":
             self._create_session()
@@ -1726,6 +1979,37 @@ class TauWebRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(payload, status=HTTPStatus.CREATED)
+
+    def _update_dataquery_config(self) -> None:
+        body = self._read_command_json()
+        if body is None:
+            return
+        try:
+            payload = self._tau_server.web_runtime.dataquery_update(body)
+        except WebSessionValidationError as exc:
+            self._send_json(
+                {"error": exc.code, "message": str(exc)},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+            return
+        except (FutureTimeoutError, OSError, RuntimeError, ValueError) as exc:
+            self._send_json(
+                {"error": "dataquery_update_failed", "message": str(exc)},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self._send_json(payload)
+
+    def _test_dataquery_connection(self) -> None:
+        try:
+            payload = self._tau_server.web_runtime.dataquery_test_connection()
+        except (FutureTimeoutError, OSError, RuntimeError, ValueError) as exc:
+            self._send_json(
+                {"error": "dataquery_test_failed", "message": str(exc)},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self._send_json(payload)
 
     def _update_provider(self) -> None:
         body = self._read_command_json()

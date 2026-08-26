@@ -1,0 +1,68 @@
+{
+  "body": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "<redacted:content>",
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": 0,
+    "id": "<redacted:id>",
+    "model": "<redacted:model>",
+    "object": "chat.completion",
+    "sag": {
+      "citations": [
+        {
+          "chunk_id": "<redacted:chunk_id>",
+          "claim_level": "<redacted:claim_level>",
+          "event_refs": [
+            {
+              "category": "<redacted:category>",
+              "content": "<redacted:content>",
+              "id": "<redacted:id>",
+              "start_time": "<redacted:start_time>",
+              "summary": "<redacted:summary>",
+              "title": "<redacted:title>"
+            },
+            {
+              "category": "<redacted:category>",
+              "content": "<redacted:content>",
+              "id": "<redacted:id>",
+              "start_time": "<redacted:start_time>",
+              "summary": "<redacted:summary>",
+              "title": "<redacted:title>"
+            },
+            {
+              "category": "<redacted:category>",
+              "content": "<redacted:content>",
+              "id": "<redacted:id>",
+              "start_time": "<redacted:start_time>",
+              "summary": "<redacted:summary>",
+              "title": "<redacted:title>"
+            }
+          ],
+          "heading": "<redacted:heading>",
+          "kind": "internal",
+          "mapped": true,
+          "n": 0,
+          "score": 0,
+          "snippet": "<redacted:snippet>",
+          "source_id": "<redacted:source_id>",
+          "source_name": "<redacted:source_name>"
+        }
+      ],
+      "sources": 0
+    },
+    "usage": {
+      "completion_tokens": 0,
+      "prompt_tokens": 0,
+      "total_tokens": 0
+    }
+  },
+  "contentType": "application/json",
+  "status": 200
+}

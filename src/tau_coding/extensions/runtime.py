@@ -159,6 +159,9 @@ class ExtensionRuntime:
         self._prompt_guidelines: list[tuple[str, str]] = []
         self._message_renderers: dict[str, tuple[str, MessageRenderer]] = {}
         self._renderer_failures_reported: set[str] = set()
+        self._authorization_views: dict[
+            str, tuple[str, Callable[[Mapping[str, JSONValue]], Mapping[str, JSONValue] | None]]
+        ] = {}
         self._load_diagnostics: list[ResourceDiagnostic] = []
         self._runtime_diagnostics: list[ResourceDiagnostic] = []
         self._session: BoundSession | None = None
@@ -215,6 +218,7 @@ class ExtensionRuntime:
         self._prompt_guidelines.clear()
         self._message_renderers.clear()
         self._renderer_failures_reported.clear()
+        self._authorization_views.clear()
         self._load_diagnostics.clear()
         self._runtime_diagnostics.clear()
         unload_extension_modules()
@@ -458,6 +462,42 @@ class ExtensionRuntime:
             )
             return
         self._prompt_guidelines.append((extension_name, normalized))
+
+    def register_diagnostic(self, extension_name: str, message: str, *, severity: str) -> None:
+        """Record a non-fatal extension diagnostic surfaced via the session."""
+        self._runtime_diagnostics.append(
+            ResourceDiagnostic(
+                kind="extension",
+                name=extension_name,
+                message=message,
+                severity=severity,
+            )
+        )
+
+    def register_authorization_view(
+        self,
+        extension_name: str,
+        tool_name: str,
+        view: Callable[[Mapping[str, JSONValue]], Mapping[str, JSONValue] | None],
+    ) -> None:
+        """Register a confirmation-dialog enrichment provider for a tool."""
+        self._authorization_views[tool_name] = (extension_name, view)
+
+    def authorization_view(
+        self, tool_name: str, arguments: Mapping[str, JSONValue]
+    ) -> Mapping[str, JSONValue] | None:
+        """Return the host confirmation enrichment payload for a tool call."""
+        entry = self._authorization_views.get(tool_name)
+        if entry is None:
+            return None
+        _extension_name, view = entry
+        try:
+            result = view(arguments)
+        except Exception:  # noqa: BLE001 - views are an isolation boundary
+            return None
+        if not isinstance(result, Mapping):
+            return None
+        return dict(result)
 
     def subscribe(self, extension_name: str, event: str, handler: ExtensionHandler) -> None:
         """Subscribe an extension handler to a named event."""
