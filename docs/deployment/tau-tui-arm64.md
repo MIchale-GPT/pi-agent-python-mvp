@@ -13,20 +13,18 @@
 
 ## 网络拓扑
 
-生产默认采用 SAG Compose 的 bridge 网络：
+生产采用 host 网络访问宿主机 DWS，同时给 `api` 注入 SAG 容器 IP：
 
 ```text
-Tau 容器 ── sag_default ──> api:8000 (SAG Agent/MCP)
+Tau 容器 (--network host) ──> 127.0.0.1:35432 (宿主机 DWS)
     │
-    └── host.docker.internal:35432 ──> 宿主机发布的 DWS
+    └── /etc/hosts: api=<SAG api 容器 IP> ──> api:8000 (SAG Agent/MCP)
 ```
 
-Tau 不发布端口，不需要 Nginx 或 CORS。`tau-start.sh` 会注入
-`host.docker.internal:host-gateway`，让容器可以访问宿主机发布的 DWS。
-
-不要同时使用 `--network host` 和 `docker network connect sag_default`：Docker
-不允许 host 网络容器再加入 bridge 网络。只有现场已经提供不含路径前缀的、
-宿主机可达 SAG API 地址时，才适合单独采用 host 网络方案。
+Tau 不发布端口，不需要 Nginx 或 CORS。`tau-start.sh` 从 `sag_default` 解析
+SAG `api` 容器 IP，并通过 `--add-host api:<IP>` 注入名称解析；Linux 宿主机可
+直接路由到本机 Docker bridge，因此无需把 host-network Tau 再接入 bridge。
+SAG 容器被重新创建后 IP 可能变化，此时重新运行 `tau-start.sh`。
 
 ## 1. 外网构建机生成 ARM64 包
 
@@ -50,6 +48,7 @@ dist/tau-arm64-tui.tar
 dist/tau-arm64-tui.tar.sha256
 tau-start.sh
 tau.env.production.example
+tau.credentials.json.example
 ```
 
 ## 2. 上线机校验并载入
@@ -75,7 +74,7 @@ chmod 600 tau.env.production
 
 至少确认这些值：
 
-- `TAU_DWS_HOST=host.docker.internal`；如果 DWS 是远端服务，改为真实内网地址；
+- `TAU_DWS_HOST=127.0.0.1`；如果 DWS 是远端服务，改为真实内网地址；
 - `TAU_DWS_ALLOWED_OBJECTS` 是 DBA 审批后的精确白名单，不能留空；
 - `TAU_SAG_AGENT_ID`、`TAU_SAG_SOURCE_ID` 使用生产值；
 - `TAU_SAG_AGENT_ORIGIN=http://api:8000`；
@@ -90,7 +89,7 @@ chmod 600 tau.env.production
 
 ```bash
 mkdir -p "$HOME/.tau"
-cp examples/credentials.json.example "$HOME/.tau/credentials.json"
+cp tau.credentials.json.example "$HOME/.tau/credentials.json"
 chmod 700 "$HOME/.tau"
 chmod 600 "$HOME/.tau/credentials.json" tau.env.production
 ```
@@ -110,12 +109,14 @@ chmod 600 "$HOME/.tau/credentials.json" tau.env.production
 
 ## 4. 确认 SAG 网络并启动
 
-先启动 SAG，再确认 Compose 网络。SAG 仓库声明了 `name: sag`，默认网络应为
-`sag_default`：
+先启动 SAG，再确认 Compose 网络和 `api` 服务容器。SAG 仓库声明了
+`name: sag`，默认网络应为 `sag_default`：
 
 ```bash
 docker network inspect sag_default >/dev/null
-docker ps --filter label=com.docker.compose.project=sag
+docker ps \
+  --filter label=com.docker.compose.project=sag \
+  --filter label=com.docker.compose.service=api
 ```
 
 启动 Tau：
@@ -125,15 +126,15 @@ cd /home/michale/pgm/zhishu/tau
 ./tau-start.sh
 ```
 
-如现场 Compose 项目名不同，显式覆盖网络名：
+如现场 Compose 项目名或服务标签不同，显式覆盖网络名和 API 容器：
 
 ```bash
-SAG_NETWORK=my_sag_default ./tau-start.sh
+SAG_NETWORK=my_sag_default SAG_API_CONTAINER=my-sag-api-1 ./tau-start.sh
 ```
 
-脚本会验证镜像、网络和 `TAU_SAG_PLANNING_MODE=agent`，用
-`/bin/sleep infinity` 覆盖镜像的 `tau` entrypoint 以保持容器常驻，然后执行
-一次 `tau --help`。重复运行会替换同名 `tau` 容器，但保留
+脚本会验证镜像、网络和 `TAU_SAG_PLANNING_MODE=agent`，解析 SAG API IP，
+以 host 网络启动，并用 `/bin/sleep infinity` 覆盖镜像的 `tau` entrypoint
+保持容器常驻，然后执行一次 `tau --help`。重复运行会替换同名 `tau` 容器，但保留
 `tau-runtime/.tau` 的会话与日志。
 
 ## 5. 上线验证
@@ -176,10 +177,12 @@ IMAGE_TAG=tau:arm64-tui-previous ./tau-start.sh
 
 - `network sag_default not found`：SAG 未启动或 Compose 项目名不同，用
   `docker network ls` 找到真实网络后设置 `SAG_NETWORK`。
+- `expected one running SAG api container`：标签识别不到或识别到多个容器，设置
+  `SAG_API_CONTAINER` 为确切容器名；SAG 重建后再次运行启动脚本刷新 IP。
 - `agent_origin_invalid`：Agent origin 含 `/sag` 路径；在 SAG 网络内必须使用
   `http://api:8000`。
-- DWS 连接失败：确认宿主机端口对 Docker gateway 可达；若数据库只监听
-  `127.0.0.1`，改为可被容器访问的绑定地址或使用远端内网地址。
+- DWS 连接失败：确认宿主机 `127.0.0.1:35432` 正在监听，或把
+  `TAU_DWS_HOST` 改为真实远端内网地址。
 - 工具未出现：确认 `TAU_SAG_PLANNING_MODE=agent`，然后新建 session 或 `/reload`。
 - 非交互执行被拒绝：这是默认安全行为；生产探活不要开启自动 SQL 执行，只有在
   可信、受控的批处理场景才显式设置 `TAU_DATA_AUTO_APPROVE_EXECUTE=1`。

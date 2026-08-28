@@ -11,7 +11,12 @@ __pycache__
 .env.*
 *.env
 *.env.*
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
 *credentials*
+**/*credentials*.json
 .tau
 .agents
 dist

@@ -10,7 +10,7 @@ IMAGE_ARCHIVE=${IMAGE_ARCHIVE:-dist/tau-arm64-tui.tar}
 BUILD_RETRIES=${BUILD_RETRIES:-3}
 DRY_RUN=${DRY_RUN:-0}
 
-run() {
+run_unless_dry() {
     printf '+ '
     printf '%q ' "$@"
     printf '\n'
@@ -54,7 +54,7 @@ fi
 
 attempt=1
 while true; do
-    if run docker buildx build \
+    if run_unless_dry docker buildx build \
         --platform "$TARGET_PLATFORM" \
         --progress=plain \
         --load \
@@ -72,7 +72,8 @@ while true; do
     ((attempt += 1))
 done
 
-run docker image inspect "$IMAGE_TAG" --format '{{.Id}} {{.Os}}/{{.Architecture}} {{.Size}} bytes'
+run_unless_dry docker image inspect \
+    "$IMAGE_TAG" --format '{{.Id}} {{.Os}}/{{.Architecture}} {{.Size}} bytes'
 
 if [[ "$DRY_RUN" != "1" ]]; then
     actual_platform=$(docker image inspect "$IMAGE_TAG" --format '{{.Os}}/{{.Architecture}}')
@@ -83,20 +84,20 @@ if [[ "$DRY_RUN" != "1" ]]; then
 fi
 
 echo "==> Smoke tests"
-run docker run --rm --platform "$TARGET_PLATFORM" "$IMAGE_TAG" --help
-run docker run --rm --platform "$TARGET_PLATFORM" "$IMAGE_TAG" --print --help
+run_unless_dry docker run --rm --platform "$TARGET_PLATFORM" "$IMAGE_TAG" --help
+run_unless_dry docker run --rm --platform "$TARGET_PLATFORM" "$IMAGE_TAG" --print --help
 
 echo "==> Export image"
-run mkdir -p "$archive_dir"
+run_unless_dry mkdir -p "$archive_dir"
 temporary_archive="${IMAGE_ARCHIVE}.tmp.$$"
 if [[ "$DRY_RUN" == "1" ]]; then
-    run docker save --output "$temporary_archive" "$IMAGE_TAG"
-    run mv "$temporary_archive" "$IMAGE_ARCHIVE"
+    run_unless_dry docker save --output "$temporary_archive" "$IMAGE_TAG"
+    run_unless_dry mv "$temporary_archive" "$IMAGE_ARCHIVE"
     printf '+ sha256sum %q > %q\n' "$IMAGE_ARCHIVE" "$checksum_path"
 else
     trap 'rm -f -- "$temporary_archive"' EXIT
-    run docker save --output "$temporary_archive" "$IMAGE_TAG"
-    run mv "$temporary_archive" "$IMAGE_ARCHIVE"
+    run_unless_dry docker save --output "$temporary_archive" "$IMAGE_TAG"
+    run_unless_dry mv "$temporary_archive" "$IMAGE_ARCHIVE"
     sha256sum "$IMAGE_ARCHIVE" >"$checksum_path"
     trap - EXIT
 fi

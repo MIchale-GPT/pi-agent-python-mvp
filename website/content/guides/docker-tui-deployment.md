@@ -21,16 +21,17 @@ On the ARM64 host, load it and start the persistent exec target:
 ```bash
 docker load --input dist/tau-arm64-tui.tar
 cp tau.env.production.example tau.env.production
+cp tau.credentials.json.example "$HOME/.tau/credentials.json"
 # Fill in the production allowlist, SAG ids, provider settings, and secrets.
 ./tau-start.sh
 docker exec -it tau tau
 ```
 
-The default launcher joins `sag_default`, so Agent requests use
-`http://api:8000` without the host Nginx `/sag` prefix. It adds
-`host.docker.internal` for a DWS port published by the host and publishes no Tau
-ports. Docker does not allow a host-networked container to join this SAG bridge,
-so do not combine `--network host` with a later `docker network connect`.
+The launcher uses host networking, so a DWS bound to host loopback remains
+reachable. It resolves the SAG `api` container IP from `sag_default` and injects
+that address as the `api` host entry, so Agent requests still use
+`http://api:8000` without the host Nginx `/sag` prefix. Tau publishes no ports.
+Rerun the launcher after SAG is recreated so the injected IP stays current.
 
 Configuration files and credentials under `~/.tau` are mounted individually as
 read-only files. Sessions and logs remain writable under `tau-runtime/.tau`.

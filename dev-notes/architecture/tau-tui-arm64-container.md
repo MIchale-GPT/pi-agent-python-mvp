@@ -23,10 +23,11 @@ the launcher overrides it with `sleep infinity` only to provide a stable target
 for `docker exec -it tau tau`.
 
 The PRD proposed both host networking and a later connection to the SAG bridge.
-Docker rejects that combination. The implemented launcher instead starts on
-`sag_default`, resolves SAG as `api:8000`, publishes no ports, and injects the
-Linux host gateway for a host-published DWS. This preserves the selected direct
-SAG integration while making the topology executable.
+Docker rejects that combination. The launcher keeps host networking so a DWS
+bound to `127.0.0.1` remains reachable, resolves the SAG `api` container IP from
+`sag_default`, and adds that IP as the container's `api` host entry. Native
+Linux can route from the host namespace to its Docker bridge, so Tau reaches
+`api:8000` without joining a second network or using the `/sag` proxy prefix.
 
 Tau's home also needs two different access modes: credentials and provider
 configuration are read-only, while sessions and diagnostic logs are writable.

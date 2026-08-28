@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -25,7 +26,10 @@ def test_docker_image_installs_dataquery_cli_contract() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert dockerfile.startswith("FROM python:3.12-slim")
-    assert 'pip install ".[dataquery]"' in dockerfile
+    assert "COPY --from=ghcr.io/astral-sh/uv:0.11.28" in dockerfile
+    assert "uv sync --frozen --no-dev --extra dataquery --no-editable" in dockerfile
+    assert "uv run --frozen --no-sync tau --help" in dockerfile
+    assert "pip install" not in dockerfile
     assert 'ENTRYPOINT ["tau"]' in dockerfile
     assert 'CMD ["--help"]' in dockerfile
 
@@ -33,7 +37,19 @@ def test_docker_image_installs_dataquery_cli_contract() -> None:
 def test_docker_build_context_excludes_runtime_secrets_and_outputs() -> None:
     patterns = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
 
-    assert {".env", ".env.*", "*.env", "*.env.*", "*credentials*", "dist"} <= patterns
+    assert {
+        ".env",
+        ".env.*",
+        "*.env",
+        "*.env.*",
+        "**/.env",
+        "**/.env.*",
+        "**/*.env",
+        "**/*.env.*",
+        "*credentials*",
+        "**/*credentials*.json",
+        "dist",
+    } <= patterns
 
 
 def test_arm64_build_dry_run_covers_build_smoke_save_and_checksum() -> None:
@@ -61,12 +77,19 @@ def test_start_dry_run_uses_sag_network_and_overrides_tau_entrypoint(tmp_path: P
             "DRY_RUN": "1",
             "TAU_ENV_FILE": str(env_file),
             "TAU_HOME_DIR": str(tau_home),
+            "SAG_API_IP": "172.30.0.8",
         },
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "--network sag_default" in result.stdout
-    assert "--add-host host.docker.internal:host-gateway" in result.stdout
+    assert "--network host" in result.stdout
+    assert "--add-host api:172.30.0.8" in result.stdout
     assert "--entrypoint /bin/sleep" in result.stdout
     assert "tau:arm64-tui-latest infinity" in result.stdout
-    assert "--network host" not in result.stdout
+    assert "--network sag_default" not in result.stdout
+
+
+def test_offline_credentials_template_has_dataquery_secret_keys() -> None:
+    credentials = json.loads((ROOT / "tau.credentials.json.example").read_text(encoding="utf-8"))
+
+    assert set(credentials) == {"dataquery.dws.password", "dataquery.sag.token"}
