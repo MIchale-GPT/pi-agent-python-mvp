@@ -67,6 +67,77 @@ async def issue_bundle(service: DataQuestionService) -> str:
     return str(result["bundleId"])
 
 
+async def test_template_must_be_read_and_rendered_before_prepare():
+    template = """## BS.SQL.TEMPLATE.003 — 资产负债率
+```sql
+SELECT a.total, l.total, l.total / NULLIF(a.total, 0) * 100 AS ratio
+FROM {{asset_table}} AS a JOIN {{liability_table}} AS l ON a.year_month = l.year_month
+WHERE a.entity = %s AND a.year_month = %s
+```
+"""
+    knowledge = FakeKnowledgeBackend({"template": template})
+    query = FakeQueryBackend(table_rows=[[100, 40, 40]])
+    service = DataQuestionService(
+        knowledge=knowledge,
+        query=query,
+        policy=SqlPolicyChecker(
+            allowed_objects=AllowedObjects.parse(["myschema.assets", "myschema.liabilities"])
+        ),
+    )
+    service.on_run_start(session_id="session-1")
+    found = await service.search("京能信息 202504 资产负债率 BS.SQL.TEMPLATE.003")
+    bundle_id = str(found["bundleId"])
+    evidence_id = str(found["evidence"][0]["evidenceId"])
+    with pytest.raises(DataQueryValidationError, match="read before"):
+        service.prepare(
+            sql="SELECT 1",
+            params=[],
+            evidence_ids=[evidence_id],
+            bundle_id=bundle_id,
+            template_id="BS.SQL.TEMPLATE.003",
+            template_evidence_id=evidence_id,
+            template_sql="SELECT 1",
+            identifiers={},
+        )
+    await service.read(evidence_id, bundle_id)
+    body = template.split("```sql\n", 1)[1].split("\n```", 1)[0]
+    rendered = body.replace("{{asset_table}}", "myschema.assets").replace(
+        "{{liability_table}}", "myschema.liabilities"
+    )
+    prepared = service.prepare(
+        sql=rendered,
+        params=["E100198", 202504],
+        evidence_ids=[evidence_id],
+        bundle_id=bundle_id,
+        template_id="BS.SQL.TEMPLATE.003",
+        template_evidence_id=evidence_id,
+        template_sql=body,
+        identifiers={"asset_table": "myschema.assets", "liability_table": "myschema.liabilities"},
+    )
+    await service.execute(str(prepared["planId"]))
+    assert query.param_sets == [("E100198", 202504)]
+
+
+async def test_template_render_rejects_body_not_matching_read_evidence():
+    knowledge = FakeKnowledgeBackend({"template": "```sql\nSELECT 1 FROM myschema.orders\n```"})
+    service, _, _ = build_service(knowledge=knowledge)
+    found = await service.search("orders")
+    bundle_id = str(found["bundleId"])
+    evidence_id = str(found["evidence"][0]["evidenceId"])
+    await service.read(evidence_id, bundle_id)
+    with pytest.raises(DataQueryValidationError, match="does not match"):
+        service.prepare(
+            sql="SELECT 1 FROM myschema.orders",
+            params=[],
+            evidence_ids=[evidence_id],
+            bundle_id=bundle_id,
+            template_id="BS.SQL.TEMPLATE.003",
+            template_evidence_id=evidence_id,
+            template_sql="SELECT 2 FROM myschema.orders",
+            identifiers={},
+        )
+
+
 def valid_sql() -> str:
     return (
         "SELECT region, SUM(amount) AS total FROM myschema.orders WHERE region = %s GROUP BY region"
@@ -314,6 +385,8 @@ class TestExecute:
         assert result["columns"] == ["id", "region", "amount"]
         assert result["truncated"] is False
         assert result["truncationReasons"] == []
+        assert result["emptyResult"] is False
+        assert result["resultStatus"] == "rows_returned"
         assert query.statements == [valid_sql()]
         assert query.param_sets == [("east",)]
 
@@ -389,6 +462,7 @@ class TestExecute:
         assert sql in message
         assert 'column "total_bad" does not exist' in message
         assert "east" not in message
+        assert "terminalMessage" not in message
 
     async def test_execute_infrastructure_error_does_not_invite_sql_repair(self) -> None:
         failing = FakeQueryBackend(table_rows=ROWS, columns=COLUMNS)
@@ -443,6 +517,23 @@ class TestRunScoping:
         serialized = "".join(record.to_json().__repr__() for record in records)
         assert "east" not in serialized
         assert "plan_" in serialized
+
+    async def test_execute_returns_terminal_empty_result_note(self) -> None:
+        query = FakeQueryBackend(table_rows=[], columns=COLUMNS)
+        service, _k, _q = build_service(query=query)
+        bundle_id = await issue_bundle(service)
+        plan_id = str(
+            service.prepare(
+                sql=valid_sql(), params=["east"], evidence_ids=["ev1"], bundle_id=bundle_id
+            )["planId"]
+        )
+        result = await service.execute(plan_id)
+
+        assert result["rowCount"] == 0
+        assert result["emptyResult"] is True
+        assert result["resultStatus"] == "no_rows"
+        assert "final factual result" in result["terminalMessage"]
+        assert "no matching records" in result["terminalMessage"]
 
     async def test_handles_are_opaque_and_server_generated(self) -> None:
         service, _k, _q = build_service()

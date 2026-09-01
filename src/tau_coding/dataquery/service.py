@@ -16,8 +16,9 @@ Every handle is opaque and run-scoped; stale or guessed handles fail closed.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -62,6 +63,12 @@ MAX_QUESTION_LENGTH = MAX_QUESTION_BYTES
 MAX_RETRY_CONTEXT_LENGTH = MAX_RETRY_CONTEXT_BYTES
 MAX_EVIDENCE_IDS = 20
 MAX_SQL_LENGTH = 64 * 1024
+_TEMPLATE_ID = re.compile(r"^[A-Z][A-Z0-9_.-]*\.TEMPLATE\.[0-9]+$")
+_SQL_FENCE = re.compile(r"```sql\s*\n(?P<body>.*?)\n```", re.IGNORECASE | re.DOTALL)
+_IDENTIFIER_SLOT = re.compile(r"\{\{(?P<name>[a-z][a-z0-9_]*)\}\}")
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+
+logger = logging.getLogger(__name__)
 
 
 class DataQueryError(ValueError):
@@ -196,6 +203,7 @@ class DataQuestionService:
         self._ledger = EvidenceLedger()
         self._plans = QueryPlanStore()
         self._bundle_read_bytes: dict[str, int] = {}
+        self._template_reads: dict[tuple[str, str], str] = {}
         self._planner_lock = asyncio.Lock()
         self._planner_conversation: _PlannerConversation | None = None
 
@@ -206,6 +214,7 @@ class DataQuestionService:
         self._plans.reset_scope()
         self._ledger.reset_scope(session_id=session_id)
         self._bundle_read_bytes.clear()
+        self._template_reads.clear()
         self._planner_conversation = None
 
     def on_run_end(self) -> None:
@@ -351,6 +360,7 @@ class DataQuestionService:
         except Exception as exc:  # noqa: BLE001 - backend isolation
             raise KnowledgeError(_sanitize(str(exc) or type(exc).__name__, self._secrets)) from exc
         self._bundle_read_bytes[bundle.bundle_id] = used + len(content.content.encode("utf-8"))
+        self._template_reads[(bundle.bundle_id, evidence_id)] = content.content
         self._audit.append(
             AuditRecord(
                 event="read",
@@ -368,12 +378,26 @@ class DataQuestionService:
         params: Sequence[object],
         evidence_ids: Sequence[str],
         bundle_id: str | None = None,
+        template_id: str | None = None,
+        template_evidence_id: str | None = None,
+        template_sql: str | None = None,
+        identifiers: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Validate, bind and freeze a query plan (decision 6/7)."""
         if not isinstance(sql, str) or not sql.strip():
             raise DataQueryValidationError("sql must be a non-empty string")
         if len(sql) > MAX_SQL_LENGTH:
             raise DataQueryValidationError(f"sql is too long (max {MAX_SQL_LENGTH} characters)")
+        if template_id is not None:
+            sql = self._render_read_template(
+                sql=sql,
+                template_id=template_id,
+                template_evidence_id=template_evidence_id,
+                template_sql=template_sql,
+                identifiers=identifiers,
+                bundle_id=bundle_id,
+                evidence_ids=evidence_ids,
+            )
         if not isinstance(params, list) or not all(_is_json_value(value) for value in params):
             raise DataQueryValidationError("params must be a list of JSON values")
         if len(params) > MAX_PREPARE_PARAMS:
@@ -454,6 +478,51 @@ class DataQuestionService:
             "evidenceCount": len(plan.evidence_ids),
         }
 
+    def _render_read_template(
+        self,
+        *,
+        sql: str,
+        template_id: str,
+        template_evidence_id: str | None,
+        template_sql: str | None,
+        identifiers: Mapping[str, object] | None,
+        bundle_id: str | None,
+        evidence_ids: Sequence[str],
+    ) -> str:
+        """Render only a template body previously expanded from this bundle."""
+        if not isinstance(template_id, str) or not _TEMPLATE_ID.fullmatch(template_id.strip()):
+            raise DataQueryValidationError("templateId must be a stable TEMPLATE id")
+        if not isinstance(template_evidence_id, str) or not template_evidence_id.strip():
+            raise DataQueryValidationError("templateEvidenceId is required for template rendering")
+        if template_evidence_id not in evidence_ids:
+            raise DataQueryValidationError("template evidence must be included in evidenceIds")
+        bundle = self._resolve_bundle(bundle_id, template_evidence_id)
+        recorded = self._template_reads.get((bundle.bundle_id, template_evidence_id))
+        if recorded is None:
+            raise DataQueryValidationError("template must be read before it can be rendered")
+        bodies = _SQL_FENCE.findall(recorded)
+        if len(bodies) != 1 or not bodies[0].strip():
+            raise DataQueryValidationError("template evidence has no complete SQL body")
+        if not isinstance(template_sql, str) or template_sql.strip() != bodies[0].strip():
+            raise DataQueryValidationError("templateSql does not match the read template body")
+        values = identifiers or {}
+        slots = tuple(
+            dict.fromkeys(match.group("name") for match in _IDENTIFIER_SLOT.finditer(template_sql))
+        )
+        if set(values) != set(slots):
+            raise DataQueryValidationError("template identifier slots do not match the template")
+        rendered = template_sql
+        for slot in slots:
+            value = values[slot]
+            if not isinstance(value, str) or not _SAFE_IDENTIFIER.fullmatch(value.strip()):
+                raise DataQueryValidationError(f"template identifier is unsafe: {slot}")
+            rendered = rendered.replace("{{" + slot + "}}", value.strip())
+        if "{{" in rendered or "}}" in rendered:
+            raise DataQueryValidationError("template contains unresolved identifier slots")
+        if sql.strip() != rendered.strip():
+            raise DataQueryValidationError("sql must equal the controlled template rendering")
+        return rendered
+
     def plan_display(self, plan_id: str) -> QueryPlan:
         """Return a frozen plan for the host confirmation dialog (decision 16)."""
         try:
@@ -483,6 +552,13 @@ class DataQuestionService:
             )
         except Exception as exc:  # noqa: BLE001 - backend isolation
             sanitized_error = _sanitize(str(exc) or type(exc).__name__, self._secrets)
+            logger.warning(
+                "data query execute failed: run_id=%s plan_id=%s sql_fingerprint=%s error=%s",
+                self.scope.run_id,
+                plan.plan_id,
+                plan.sql_fingerprint,
+                sanitized_error,
+            )
             if _signal_is_cancelled(signal):
                 self._audit.append(
                     AuditRecord(
@@ -555,11 +631,14 @@ class DataQuestionService:
                 truncated=result.truncated,
             )
         )
-        return {
+        empty_result = len(result.rows) == 0
+        payload = {
             "sql": plan.sql,
             "columns": [column.name for column in result.columns],
             "rows": result.rows,
             "rowCount": len(result.rows),
+            "emptyResult": empty_result,
+            "resultStatus": "no_rows" if empty_result else "rows_returned",
             "truncated": result.truncated,
             "truncationReasons": list(result.truncation_reasons),
             "previewedCells": result.previewed_cells,
@@ -567,6 +646,14 @@ class DataQuestionService:
             "evidenceIds": list(plan.evidence_ids),
             "policyVersion": plan.policy_version,
         }
+        if empty_result:
+            payload["terminalMessage"] = (
+                "The query returned no matching records for the requested entity, period, and "
+                "indicator; "
+                "treat this as the final factual result unless the user asks to diagnose "
+                "missing data."
+            )
+        return payload
 
     async def close(self) -> None:
         if self._planner is not None:

@@ -60,7 +60,11 @@ _LEGACY_SEARCH_GUIDELINE = (
     "a parameterized SELECT over schema-qualified "
     "tables cited in the evidence, then data_query_execute with the returned planId. Never "
     "guess table, column or relation names not present in the evidence, and stop when evidence "
-    "is insufficient. If data_query_execute fails because the generated SQL was wrong, call "
+    "is insufficient. If data_query_execute returns 0 rows, treat that as the final factual "
+    "result for the current question: report that no matching record was found for the requested "
+    "entity/period/indicator, do not continue searching for more evidence, and only switch to "
+    "diagnostics or troubleshooting if the user explicitly asked for help explaining the missing "
+    "data. If data_query_execute fails because the generated SQL was wrong, call "
     "data_knowledge_search again with the same rewritten question and pass retryContext "
     "containing the failed SQL and the error log so the knowledge source can correct the SQL, "
     "then prepare and execute the corrected SQL. Exception: for schema introspection questions "
@@ -78,17 +82,25 @@ _AGENT_SEARCH_GUIDELINE = (
     "then call data_query_prepare and data_query_execute. Do not execute or copy inline values "
     "from the SAG answer without parameterization. Do not split the question into separate SAG "
     "lookups. Call data_knowledge_read only when a returned citation is expandable and its "
-    "snippet is insufficient. If execution returns retryContext, call data_knowledge_search "
-    "again with the exact same question and that retryContext; the extension continues the "
-    "stored SAG conversation. For schema introspection limited to pg_catalog or "
-    "information_schema, prepare directly with empty evidenceIds."
+    "snippet is insufficient. A successful data_query_execute is final: if it returns 0 rows, "
+    "no matching data exists for the requested entity, period, and indicator (for example, "
+    "the period has no loaded data yet); report that fact to the user and stop. Do not verify "
+    "entity codes, periods, or available data ranges with further tool calls after execution, "
+    "and do not call data_knowledge_search again unless execution failed and returned a "
+    "retryContext. If execution returns retryContext, call data_knowledge_search again with "
+    "the exact same question and that retryContext; the extension continues the stored SAG "
+    "conversation. For schema introspection limited to pg_catalog or information_schema, "
+    "prepare directly with empty evidenceIds."
 )
 
 _SQL_GUIDELINE = (
-    "Generate a standard PostgreSQL SELECT subset with %s positional placeholders for every "
-    "user-supplied value (never inline values). Tables must be schema-qualified and restricted "
-    "to the allowed objects; only approved built-in functions are permitted. The SQL text is "
-    "displayed to the user, so keep it readable."
+    "Prefer the SQL template returned by data_knowledge_read: pass its stable templateId, "
+    "templateEvidenceId, exact templateSql body, and only approved identifier slot values to "
+    "data_query_prepare. Never alter the template body or leave {{slots}} unresolved. Generate "
+    "a standard PostgreSQL SELECT subset with %s positional placeholders for every user-supplied "
+    "value (never inline values). Tables must be schema-qualified and restricted to the allowed "
+    "objects; only approved built-in functions are permitted. The SQL text is displayed to the "
+    "user, so keep it readable."
 )
 
 
@@ -311,6 +323,26 @@ def _register_tools(
                 params=params if isinstance(params, list) else [],
                 evidence_ids=evidence_ids,
                 bundle_id=str(bundle_id) if isinstance(bundle_id, str) else None,
+                template_id=(
+                    str(arguments["templateId"])
+                    if isinstance(arguments.get("templateId"), str)
+                    else None
+                ),
+                template_evidence_id=(
+                    str(arguments["templateEvidenceId"])
+                    if isinstance(arguments.get("templateEvidenceId"), str)
+                    else None
+                ),
+                template_sql=(
+                    str(arguments["templateSql"])
+                    if isinstance(arguments.get("templateSql"), str)
+                    else None
+                ),
+                identifiers=(
+                    arguments["identifiers"]
+                    if isinstance(arguments.get("identifiers"), dict)
+                    else None
+                ),
             )
         )
 
@@ -409,6 +441,25 @@ def _register_tools(
                         "type": "string",
                         "description": "Optional bundleId from data_knowledge_search.",
                     },
+                    "templateId": {
+                        "type": "string",
+                        "description": "Stable SQL template id, required for controlled rendering.",
+                    },
+                    "templateEvidenceId": {
+                        "type": "string",
+                        "description": "The evidence id whose full template body was read.",
+                    },
+                    "templateSql": {
+                        "type": "string",
+                        "description": "The exact SQL body returned by data_knowledge_read.",
+                    },
+                    "identifiers": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": (
+                            "Approved identifier slot values; user values belong in params."
+                        ),
+                    },
                 },
                 "required": ["evidenceId"],
             },
@@ -424,7 +475,8 @@ def _register_tools(
                 "evidence. Returns an opaque planId that data_query_execute will run. "
                 "Requires at least one evidenceId from the current knowledge search; "
                 "for schema introspection queries (pg_catalog/information_schema) the "
-                "evidenceIds list may be empty."
+                "evidenceIds list may be empty. If execution later returns 0 rows, that "
+                "is a factual terminal outcome rather than a reason to keep exploring."
             ),
             parameters={
                 "type": "object",
@@ -470,7 +522,8 @@ def _register_tools(
             description=(
                 "Execute a frozen query plan in a read-only DWS transaction and return "
                 "bounded rows plus truncation status. Confirmation is required on every "
-                "execution."
+                "execution; a 0-row result means the query found no matching records and "
+                "should be treated as the final factual outcome for that question."
             ),
             parameters={
                 "type": "object",
