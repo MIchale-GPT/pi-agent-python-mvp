@@ -470,6 +470,7 @@ class DataQuestionService:
             )
         )
         return {
+            "type": "plan_query",
             "planId": plan_id,
             "policyVersion": plan.policy_version,
             "sqlFingerprint": plan.sql_fingerprint,
@@ -867,6 +868,7 @@ class DataQuestionService:
             if on_exchange is not None:
                 on_exchange(KnowledgeExchange(request=request, response=response))
             return {
+                "type": "plan_query",
                 "mode": "agent",
                 "attempt": attempt,
                 "bundleId": bundle_id,
