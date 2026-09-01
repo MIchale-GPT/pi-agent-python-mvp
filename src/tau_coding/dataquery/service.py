@@ -67,8 +67,18 @@ _TEMPLATE_ID = re.compile(r"^[A-Z][A-Z0-9_.-]*\.TEMPLATE\.[0-9]+$")
 _SQL_FENCE = re.compile(r"```sql\s*\n(?P<body>.*?)\n```", re.IGNORECASE | re.DOTALL)
 _IDENTIFIER_SLOT = re.compile(r"\{\{(?P<name>[a-z][a-z0-9_]*)\}\}")
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+_SAFE_COLUMN_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TABLE_SLOTS = frozenset({"asset_table", "fact_table", "liability_table", "merged_table"})
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_template_identifier(slot: str, value: str) -> bool:
+    """Validate table slots separately from column/field slots."""
+    candidate = value.strip()
+    if slot in _TABLE_SLOTS or slot.endswith("_table"):
+        return bool(_SAFE_IDENTIFIER.fullmatch(candidate))
+    return bool(_SAFE_COLUMN_IDENTIFIER.fullmatch(candidate))
 
 
 class DataQueryError(ValueError):
@@ -515,7 +525,7 @@ class DataQuestionService:
         rendered = template_sql
         for slot in slots:
             value = values[slot]
-            if not isinstance(value, str) or not _SAFE_IDENTIFIER.fullmatch(value.strip()):
+            if not isinstance(value, str) or not _safe_template_identifier(slot, value):
                 raise DataQueryValidationError(f"template identifier is unsafe: {slot}")
             rendered = rendered.replace("{{" + slot + "}}", value.strip())
         if "{{" in rendered or "}}" in rendered:

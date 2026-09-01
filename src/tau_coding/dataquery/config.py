@@ -105,6 +105,8 @@ DEFAULT_SAG_QUESTION_TEMPLATE = (
     "4. 若问题涉及环比/同比或多期比较，按知识库中的SQL模板生成；\n"
     "5. 不要只返回表结构、字段解释或下一步检索建议，也不要要求按实体、口径、"
     "字段拆成多轮提问；请直接完成这些判断并给出SQL。\n\n"
+    "6. 必须在引用中包含实际使用的稳定SQL模板ID（例如 BS.SQL.TEMPLATE.003），"
+    "并保留该模板证据以便后续读取完整正文。\n\n"
     "用户问题：{question}"
 )
 DEFAULT_DWS_CONNECT_TIMEOUT = 10

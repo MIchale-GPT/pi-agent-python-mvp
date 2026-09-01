@@ -138,6 +138,65 @@ async def test_template_render_rejects_body_not_matching_read_evidence():
         )
 
 
+async def test_template_render_accepts_safe_column_slots_and_requires_qualified_tables():
+    template = """## BS.SQL.TEMPLATE.003 — 资产负债率
+```sql
+SELECT a.{{asset_value_field}}, l.{{liability_value_field}}
+FROM {{asset_table}} AS a JOIN {{liability_table}} AS l ON a.entity = l.entity
+WHERE a.entity = %s
+```
+    """
+    knowledge = FakeKnowledgeBackend({"template": template})
+    service = DataQuestionService(
+        knowledge=knowledge,
+        query=FakeQueryBackend(table_rows=[]),
+        policy=SqlPolicyChecker(
+            allowed_objects=AllowedObjects.parse(["myschema.assets", "myschema.liabilities"])
+        ),
+    )
+    found = await service.search("资产负债率")
+    bundle_id = str(found["bundleId"])
+    evidence_id = str(found["evidence"][0]["evidenceId"])
+    await service.read(evidence_id, bundle_id)
+    body = template.split("```sql\n", 1)[1].split("\n```", 1)[0]
+    rendered = body.replace("{{asset_value_field}}", "bpc_rs05_0460")
+    rendered = rendered.replace("{{liability_value_field}}", "bpc_rs06_0400")
+    rendered = rendered.replace("{{asset_table}}", "myschema.assets")
+    rendered = rendered.replace("{{liability_table}}", "myschema.liabilities")
+    plan = service.prepare(
+        sql=rendered,
+        params=["E100198"],
+        evidence_ids=[evidence_id],
+        bundle_id=bundle_id,
+        template_id="BS.SQL.TEMPLATE.003",
+        template_evidence_id=evidence_id,
+        template_sql=body,
+        identifiers={
+            "asset_value_field": "bpc_rs05_0460",
+            "liability_value_field": "bpc_rs06_0400",
+            "asset_table": "myschema.assets",
+            "liability_table": "myschema.liabilities",
+        },
+    )
+    assert plan["type"] == "plan_query"
+    with pytest.raises(DataQueryValidationError, match="unsafe: asset_table"):
+        service.prepare(
+            sql=rendered.replace("myschema.assets", "assets"),
+            params=["E100198"],
+            evidence_ids=[evidence_id],
+            bundle_id=bundle_id,
+            template_id="BS.SQL.TEMPLATE.003",
+            template_evidence_id=evidence_id,
+            template_sql=body,
+            identifiers={
+                "asset_value_field": "bpc_rs05_0460",
+                "liability_value_field": "bpc_rs06_0400",
+                "asset_table": "assets",
+                "liability_table": "myschema.liabilities",
+            },
+        )
+
+
 def valid_sql() -> str:
     return (
         "SELECT region, SUM(amount) AS total FROM myschema.orders WHERE region = %s GROUP BY region"

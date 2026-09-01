@@ -139,21 +139,25 @@ def _citations(raw: Mapping[str, Any]) -> tuple[PlannerCitation, ...]:
     if not isinstance(values, list):
         return ()
     citations: list[PlannerCitation] = []
+    seen: set[tuple[str | None, str, str]] = set()
     for index, value in enumerate(values):
         if not isinstance(value, dict):
             continue
-        citations.append(
-            PlannerCitation(
-                provider_id=_optional_text(value.get("chunk_id")),
-                source_id=_optional_text(value.get("source_id")),
-                title=(
-                    _optional_text(value.get("heading"))
-                    or _optional_text(value.get("source_name"))
-                    or f"SAG citation {index + 1}"
-                ),
-                snippet=_optional_text(value.get("snippet")) or "",
-            )
+        citation = PlannerCitation(
+            provider_id=_optional_text(value.get("chunk_id")),
+            source_id=_optional_text(value.get("source_id")),
+            title=(
+                _optional_text(value.get("heading"))
+                or _optional_text(value.get("source_name"))
+                or f"SAG citation {index + 1}"
+            ),
+            snippet=_optional_text(value.get("snippet")) or "",
         )
+        key = (citation.source_id, citation.title, citation.snippet)
+        if key in seen:
+            continue
+        seen.add(key)
+        citations.append(citation)
     return tuple(citations)
 
 
