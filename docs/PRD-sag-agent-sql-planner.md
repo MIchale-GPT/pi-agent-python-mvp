@@ -49,22 +49,26 @@ generated evidence and writes the final parameterized SQL passed to
 `data_query_prepare`. SAG text cannot change tool instructions, policy, source
 configuration, authorization, or execution behavior.
 
-Tau owns the planner conversation for each data-query run. The initial SAG
-Agent request starts with an empty planner history. Tau stores the bounded user
-request and SAG assistant response in run memory. If DWS rejects the frozen SQL,
-Tau appends the parameterized SQL and sanitized database error as the next user
-message in the same logical SAG Agent conversation and requests a corrected
-answer. A new Tau run always starts a new planner conversation.
+Tau owns one planner conversation for each initial planning search in a
+data-query run. Every initial SAG Agent request starts with empty planner
+history, so a multi-caliber, period, or entity question may use independent
+searches and evidence bundles before Tau aggregates their query results. Tau
+stores each bounded user request and SAG assistant response in run memory. If
+DWS rejects frozen SQL, Tau appends the parameterized SQL and sanitized database
+error to the conversation associated with that SQL's evidence bundle. A new Tau
+run clears all planner conversations.
 
 The public data-tool workflow in Agent mode remains:
 
 ```text
 User question
-  → data_knowledge_search (SAG Agent SQL-planning turn)
-  → optional data_knowledge_read (expand a cited source through MCP)
-  → data_query_prepare (policy-check and freeze)
-  → data_query_execute (authorized read-only DWS query)
-  → on SQL failure, data_knowledge_search retry in the same planner conversation
+  → for each requested result slice:
+      data_knowledge_search (independent SAG Agent SQL-planning conversation)
+      → optional data_knowledge_read (expand a cited source through MCP)
+      → data_query_prepare (policy-check and freeze that bundle's SQL)
+      → data_query_execute (authorized read-only DWS query)
+      → on SQL failure, retry in that slice's planner conversation
+  → aggregate all slice results in one answer
 ```
 
 The existing tool name is retained for compatibility. Its description,
@@ -96,9 +100,10 @@ contract; it does not require production DWS access.
 
 ## User Stories
 
-1. As a Tau user, I want one business-data question to produce one complete SAG
-   SQL-planning request, so that entity, period, indicator, and caliber are not
-   discovered through wasteful separate searches.
+1. As a Tau user, I want each requested result slice to produce one complete SAG
+   SQL-planning request, so that multiple calibers, periods, or entities can be
+   planned independently and aggregated without splitting discovery within a
+   slice into wasteful searches.
 2. As a Tau user, I want SAG's configured Agent instructions to participate in
    SQL generation, so that the result matches behavior already validated in the
    SAG chat interface.
@@ -188,16 +193,17 @@ contract; it does not require production DWS access.
    `unconfigured` emits a configuration diagnostic and does not register data
    tools. `legacy` explicitly selects MCP. `agent` explicitly selects SAG Agent
    chat. Agent failure never falls back to MCP.
-2. **Tau owns planner history.** Each Tau run creates one bounded in-memory
-   planner conversation. The extension, not the model, reconstructs Agent
-   messages. The initial tool call supplies the question. On correction, the
-   model supplies `retryContext`; the extension appends the stored prior SAG
-   answer and the failed parameterized SQL plus sanitized DWS error.
+2. **Tau owns planner history.** Each initial planning search creates an
+   independent bounded in-memory planner conversation within the Tau run. The
+   extension, not the model, reconstructs Agent messages. On correction, the
+   model supplies `retryContext`; the extension selects the unique pending
+   conversation for the exact original question and appends its stored prior
+   SAG answer and failed parameterized SQL plus sanitized DWS error.
 
-   The initial question stored by the extension is authoritative. A correction
-   cannot replace its entity, period, indicator, or caliber. A mismatching new
-   question is rejected and requires a new run. History is cleared on a new
-   run, extension reload, or shutdown.
+   Each stored initial question is authoritative for its conversation. A
+   correction cannot replace its entity, period, indicator, or caliber. An
+   ambiguous correction is rejected rather than guessed. All histories are
+   cleared on a new run, extension reload, or shutdown.
 3. **Do not use the message-list endpoint to ask questions.** A request that
    lists `/agents/{agent}/threads/{thread}/messages` is an observability/history
    operation. It is not the SQL-planning invocation. Native SAG thread creation,
@@ -263,11 +269,12 @@ contract; it does not require production DWS access.
     produces a copyable repair context containing the frozen SQL and sanitized
     database error. Parameter arrays are not sent to SAG or rendered in the
     repair transcript.
-15. **Bound and serialize planner turns.** A run permits one initial planning
-    turn and at most two correction turns. A run-scoped conversation store uses
-    a lock and state transition per turn. A concurrent second initial call is
-    rejected; a correction is accepted only after the current frozen plan has a
-    DWS SQL failure.
+15. **Bound and serialize planner turns.** A run permits multiple independent
+    initial planning turns, each with at most two correction turns. A run-scoped
+    conversation store maps evidence bundles to stable internal conversation
+    ids and uses one lock around each planner turn. Concurrent initial calls are
+    serialized; a correction is accepted only after that conversation's latest
+    frozen plan has a DWS SQL failure.
 
     Each turn records its `tool_call_id` and attempt number. Current sequential
     execution is an implementation detail, not a conversation-integrity
@@ -438,7 +445,8 @@ depends on ranked evidence.
 ```
 
 In Agent mode, a non-empty `retryContext` requests a correction. The extension
-looks up the run's current planner conversation and builds this message list:
+looks up the unique pending conversation whose stored original question exactly
+matches the supplied question and builds this message list:
 
 ```text
 user      exact bounded rewritten original question
@@ -447,8 +455,8 @@ user      bounded failed parameterized SQL + sanitized DWS error
 ```
 
 The model does not resend the prior assistant answer. The extension rejects a
-correction with no eligible failed plan, no prior Agent turn, a changed original
-question, or an exhausted attempt budget.
+correction with no eligible failed plan, no prior Agent turn, an ambiguous or
+changed original question, or an exhausted per-conversation attempt budget.
 
 ## Testing Decisions
 
@@ -466,11 +474,13 @@ question, or an exhausted attempt budget.
    request, cited SQL answer, evidence bundle, prepare, execute failure,
    same-conversation correction request, corrected bundle, prepare, and
    successful execution.
-4. The primary seam also verifies that a new Tau run clears planner history;
-   correction attempts are bounded; stale bundle/plan ids fail; authentication
-   and malformed Agent responses are sanitized; missing citations block
-   business prepare; parameter values and credentials never appear in SAG
-   requests or tool details.
+4. The primary seam also verifies that multiple initial searches have isolated
+   bundles and correction histories, concurrent planner calls are serialized,
+   and a new Tau run clears all planner histories; correction attempts are
+   bounded per conversation; stale bundle/plan ids fail; authentication and
+   malformed Agent responses are sanitized; missing citations block business
+   prepare; parameter values and credentials never appear in SAG requests or
+   tool details.
 5. The fake SAG Agent records HTTP method, path, headers, request messages, and
    returns deterministic Chat Completions payloads with SAG citations. Tests
    assert the Agent id is selected from trusted configuration and cannot be

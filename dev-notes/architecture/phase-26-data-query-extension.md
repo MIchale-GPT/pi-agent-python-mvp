@@ -56,11 +56,13 @@ correction workflow are enabled without falling back to MCP on Agent errors.
 ## SAG Q&A adaptation and SQL repair
 
 The configured SAG tool is a Q&A surface, not only a ranked document search.
-Tau rewrites one complete user question into an instruction that asks SAG to
-use its SQL templates, resolve entity aliases/codes and single/consolidated
-caliber internally, normalize report periods, and return only the requested
-SQL fields. The agent guideline explicitly avoids separate searches for each
-of those facts.
+Tau rewrites one complete requested result slice into an instruction that asks
+SAG to use its SQL templates, resolve entity aliases/codes and reporting caliber
+internally, normalize report periods, and return only the requested SQL fields.
+A question spanning multiple calibers, periods, or entities may use one search
+and evidence bundle per slice; the guideline then tells Tau to execute each
+bundle independently and aggregate the results. It still avoids separate
+searches for entity resolution, table structure, and other facts within a slice.
 
 SAG deployments return either ranked blocks with `chunk_id` values or a direct
 SQL answer as a plain MCP text block. Ranked blocks retain their remote ids. A
@@ -94,12 +96,15 @@ uses an application-layer `SqlPlanner` port and returns a bounded answer plus
 Tau-issued citation ids; provider ids remain ledger-only and are used solely
 for optional MCP expansion.
 
-Within one run, the service stores the rewritten initial request and prior SAG
-answers under a serialized conversation state. After an eligible DWS SQL
-error, a non-empty `retryContext` is only a correction trigger: the extension
-ignores its text and constructs feedback from the frozen parameterized SQL and
-sanitized backend error. Connection/driver failures and cancellation do not
-open a correction. A new run clears the planner conversation.
+Within one run, the service stores each rewritten initial request and prior SAG
+answers in an independent planner conversation. A stable internal id owns the
+conversation, and every evidence bundle maps back to its lineage. After an
+eligible DWS SQL error, a non-empty `retryContext` is only a correction trigger:
+the extension selects the unique pending conversation for the exact original
+question, ignores the trigger text, and constructs feedback from that lineage's
+frozen parameterized SQL and sanitized backend error. Connection/driver
+failures and cancellation do not open a correction. A new run clears all
+planner conversations.
 
 All SAG content is treated as untrusted. Tau's model authors the SQL passed to
 prepare, and the existing evidence, policy, freeze, authorization, and

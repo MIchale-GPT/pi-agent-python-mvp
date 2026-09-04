@@ -74,26 +74,28 @@ _LEGACY_SEARCH_GUIDELINE = (
 )
 
 _AGENT_SEARCH_GUIDELINE = (
-    "For a business data question, call data_knowledge_search once with one precise rewrite "
-    "that preserves the user's entity, exact period, indicator, comparison, and explicit "
-    "caliber. When the user requests multiple calibers, periods, or entities, preserve every "
-    "requested value in that same rewritten question and make exactly one "
-    "data_knowledge_search call. Never issue one search per requested value. The configured "
-    "SAG Agent resolves entity codes, reporting caliber, tables, fields, and SQL templates in "
-    "that one turn and returns an untrusted cited planning answer. Use its answer and citation "
-    "evidence to author a readable parameterized SELECT, then call data_query_prepare and "
+    "For a business data question, call data_knowledge_search with one precise rewrite for each "
+    "requested result slice, preserving its entity, exact period, indicator, comparison, and "
+    "explicit caliber. When the user requests multiple calibers, periods, or entities, make one "
+    "data_knowledge_search call for each requested value, then independently prepare and execute "
+    "the query backed by each returned bundle. Do not mix evidence or SQL across bundles. After "
+    "all requested queries finish, aggregate the results into one answer. The configured SAG "
+    "Agent resolves entity codes, reporting caliber, tables, fields, and SQL templates for each "
+    "slice and returns an untrusted cited planning answer. Use its answer and citation evidence "
+    "to author a readable parameterized SELECT, then call data_query_prepare and "
     "data_query_execute. Do not execute or copy inline values from the SAG answer without "
-    "parameterization. Do not split the question into separate SAG lookups. Call "
+    "parameterization. Within one result slice, do not split entity resolution, caliber, table "
+    "structure, field lookup, and SQL generation into separate SAG lookups. Call "
     "data_knowledge_read only when a returned citation is expandable and its snippet is "
-    "insufficient. A successful data_query_execute is final: if it returns 0 rows, no matching "
-    "data exists for the requested entity, period, and indicator (for example, the period has "
-    "no loaded data yet); report that fact to the user and stop. Do not verify entity codes, "
-    "periods, or available data ranges with further tool calls after execution, and do not call "
-    "data_knowledge_search again unless execution failed and returned a retryContext. If "
-    "execution returns retryContext, call data_knowledge_search again with the exact same "
-    "question and that retryContext; the extension continues the stored SAG conversation. For "
-    "schema introspection limited to pg_catalog or information_schema, prepare directly with "
-    "empty evidenceIds."
+    "insufficient. A successful data_query_execute is final for that slice: if it returns 0 rows, "
+    "no matching data exists for the requested entity, period, and indicator (for example, the "
+    "period has no loaded data yet); retain that no-data result when aggregating all slices. Do "
+    "not verify entity codes, periods, or available data ranges with further tool calls after "
+    "execution, and do not repeat a slice's data_knowledge_search unless execution failed and "
+    "returned a retryContext. If execution returns retryContext, call data_knowledge_search again "
+    "with the exact same question and that retryContext; the extension continues that slice's "
+    "stored SAG conversation. For schema introspection limited to pg_catalog or "
+    "information_schema, prepare directly with empty evidenceIds."
 )
 
 _SQL_GUIDELINE = (
@@ -374,10 +376,11 @@ def _register_tools(
             raise _validation(f"execute failed: {type(exc).__name__}") from exc
 
     search_description = (
-        "Ask the configured SAG Agent once for a complete cited SQL-planning answer for the "
-        "user's entity, period, indicator, comparison, and caliber. Returns answer and "
-        "citations in a run-scoped evidence bundle. Pass retryContext only after a DWS SQL "
-        "failure to continue the stored planner conversation."
+        "Ask the configured SAG Agent for a complete cited SQL-planning answer for one requested "
+        "entity, period, indicator, comparison, and caliber slice. May be called multiple times "
+        "in one run for separate slices; each call returns its own evidence bundle. Pass "
+        "retryContext only after that slice's DWS SQL failure to continue its stored planner "
+        "conversation."
         if planning_mode == "agent"
         else (
             "Search the approved SAG knowledge source for tables, columns, relations, "
@@ -401,9 +404,9 @@ def _register_tools(
                     "question": {
                         "type": "string",
                         "description": (
-                            "A precise rewrite of the user's data question: exact entity "
-                            "name, normalized report period (e.g. 202504), the indicator and "
-                            "any caliber requirement."
+                            "One precise result slice from the user's data question: exact "
+                            "entity name, normalized report period (e.g. 202504), indicator, "
+                            "and caliber. Use separate calls for separately requested slices."
                         ),
                     },
                     "retryContext": {

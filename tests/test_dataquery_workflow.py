@@ -681,6 +681,87 @@ class TestAgentPlannerConversation:
         )
         assert transcript_bytes <= 130
 
+    async def test_multiple_searches_keep_independent_correction_histories(self) -> None:
+        query = FakeQueryBackend(
+            table_rows=ROWS,
+            columns=COLUMNS,
+            fail_with=QuerySqlError('column "amount_bad" does not exist'),
+        )
+        service, _query, planner = build_agent_service(query=query)
+        questions = (
+            "杭锦旗西部能源开发有限公司2024年4月单体口径负债合计",
+            "杭锦旗西部能源开发有限公司2024年4月合并口径负债合计",
+        )
+        failed_sql = (
+            "SELECT amount_single FROM myschema.orders",
+            "SELECT amount_consolidated FROM myschema.orders",
+        )
+
+        bundles: list[str] = []
+        for question, sql in zip(questions, failed_sql, strict=True):
+            search = await service.search(question)
+            bundles.append(str(search["bundleId"]))
+            citation = search["citations"][0]  # type: ignore[index]
+            plan = service.prepare(
+                sql=sql,
+                params=[],
+                evidence_ids=[citation["evidenceId"]],  # type: ignore[index]
+                bundle_id=str(search["bundleId"]),
+            )
+            with pytest.raises(QueryExecutionError):
+                await service.execute(str(plan["planId"]))
+
+        repaired_single = await service.search(questions[0], retry_context="retry single")
+        repaired_consolidated = await service.search(
+            questions[1], retry_context="retry consolidated"
+        )
+
+        assert bundles[0] != bundles[1]
+        assert repaired_single["attempt"] == repaired_consolidated["attempt"] == 2
+        assert planner.calls[0] == [
+            {"role": "user", "content": f"Plan exactly: {questions[0]}"}
+        ]
+        assert planner.calls[1] == [
+            {"role": "user", "content": f"Plan exactly: {questions[1]}"}
+        ]
+        assert planner.calls[2][0] == planner.calls[0][0]
+        assert planner.calls[2][1] == {
+            "role": "assistant",
+            "content": "SELECT amount_1 FROM myschema.orders",
+        }
+        assert failed_sql[0] in planner.calls[2][2]["content"]
+        assert planner.calls[3][0] == planner.calls[1][0]
+        assert planner.calls[3][1] == {
+            "role": "assistant",
+            "content": "SELECT amount_2 FROM myschema.orders",
+        }
+        assert failed_sql[1] in planner.calls[3][2]["content"]
+
+    async def test_retry_rejects_ambiguous_duplicate_question_histories(self) -> None:
+        query = FakeQueryBackend(
+            table_rows=ROWS,
+            columns=COLUMNS,
+            fail_with=QuerySqlError('column "amount_bad" does not exist'),
+        )
+        service, _query, planner = build_agent_service(query=query)
+        question = "京能技术2025年4月短期借款"
+
+        for attempt in range(2):
+            search = await service.search(question)
+            citation = search["citations"][0]  # type: ignore[index]
+            plan = service.prepare(
+                sql=f"SELECT amount_{attempt} FROM myschema.orders",
+                params=[],
+                evidence_ids=[citation["evidenceId"]],  # type: ignore[index]
+                bundle_id=str(search["bundleId"]),
+            )
+            with pytest.raises(QueryExecutionError):
+                await service.execute(str(plan["planId"]))
+
+        with pytest.raises(DataQueryValidationError, match="retryContext is ambiguous"):
+            await service.search(question, retry_context="retry")
+        assert len(planner.calls) == 2
+
     async def test_correction_history_keeps_original_question_and_latest_answer_only(
         self,
     ) -> None:

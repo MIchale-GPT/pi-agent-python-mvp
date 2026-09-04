@@ -14,9 +14,10 @@ Planning has three states:
   reports a named configuration diagnostic;
 - `legacy`: Tau searches one fixed SAG MCP source and preserves the original
   ranked-evidence result contract;
-- `agent`: Tau sends one complete rewritten question to a configured SAG Agent,
-  receives an answer plus citations, and keeps corrections in one run-scoped
-  planner conversation. Agent errors never fall back to MCP.
+- `agent`: Tau sends each requested result slice to a configured SAG Agent,
+  receives an answer plus citations in an independent evidence bundle, and
+  keeps corrections in that slice's run-scoped planner conversation. Agent
+  errors never fall back to MCP.
 
 The Agent HTTP adapter follows the reviewed target-deployment contract captured
 under `tests/fixtures/sag_agent/`. Agent request errors fail explicitly and
@@ -58,12 +59,11 @@ requires usable citations, but does not maintain a second per-source allowlist.
 
 ## Ask a data question
 
-The agent will:
+For each requested result slice, the agent will:
 
-1. rewrite the complete question into one SAG request containing the entity,
-   normalized report period, indicator and requested comparison/caliber, then
-   ask SAG to use its SQL templates and resolve entity codes and reporting
-   caliber itself;
+1. rewrite that slice into one SAG request containing its entity, normalized
+   report period, indicator and requested comparison/caliber, then ask SAG to
+   use its SQL templates and resolve entity codes and reporting caliber itself;
 2. prepare a parameterized `SELECT` with schema-qualified tables and `%s`
    placeholders (values are never inlined into the displayed SQL);
 3. ask for confirmation once, showing the frozen SQL, evidence count, timeout
@@ -77,16 +77,18 @@ is untrusted generated evidence—not executable authority. Tau's model still
 writes the final parameterized SQL, and prepare still validates its AST,
 allowlist, placeholders and current-run citation ids.
 
-When a request names multiple reporting calibers, periods, or entities, Tau
-keeps every requested value in that single SAG question instead of issuing one
-search per value.
+When a request names multiple reporting calibers, periods, or entities, Tau may
+issue one planning search per requested value. Each returned bundle is prepared
+and executed independently; Tau does not mix evidence or SQL across bundles and
+aggregates all results into one final answer.
 
 If DWS rejects the SQL statement, the tool error includes the frozen
 parameterized SQL and sanitized database error as a copyable `retryContext`.
-The extension—not the model—reconstructs the exact conversation as original
-user request, prior SAG answer, then SQL/error feedback. At most two correction
-turns are allowed. Cancellation, authentication, connection and other
-infrastructure failures do not open or consume a SQL-correction turn.
+The extension—not the model—selects the unique pending conversation for the
+exact original slice and reconstructs it as original request, prior SAG answer,
+then SQL/error feedback. At most two correction turns are allowed per planner
+conversation. Cancellation, authentication, connection and other infrastructure
+failures do not open or consume a SQL-correction turn.
 
 ### Inspect the SAG exchange in the TUI
 

@@ -159,7 +159,7 @@ class AuditRecord:
 
 @dataclass(slots=True)
 class _PlannerConversation:
-    """Mutable run-scoped state serialized by ``_planner_lock``."""
+    """One mutable run-scoped planner lineage serialized by ``_planner_lock``."""
 
     original_question: str
     messages: list[PlannerMessage]
@@ -215,7 +215,8 @@ class DataQuestionService:
         self._bundle_read_bytes: dict[str, int] = {}
         self._template_reads: dict[tuple[str, str], str] = {}
         self._planner_lock = asyncio.Lock()
-        self._planner_conversation: _PlannerConversation | None = None
+        self._planner_conversations: dict[str, _PlannerConversation] = {}
+        self._planner_bundle_conversations: dict[str, str] = {}
 
     # -- run scope -----------------------------------------------------------
 
@@ -225,7 +226,8 @@ class DataQuestionService:
         self._ledger.reset_scope(session_id=session_id)
         self._bundle_read_bytes.clear()
         self._template_reads.clear()
-        self._planner_conversation = None
+        self._planner_conversations.clear()
+        self._planner_bundle_conversations.clear()
 
     def on_run_end(self) -> None:
         """End the run; scoped state is dropped on the next run start."""
@@ -607,7 +609,16 @@ class DataQuestionService:
             repair_message = _execution_repair_message(repair_context, sanitized_error)
             if self._planning_mode == "agent":
                 async with self._planner_lock:
-                    conversation = self._planner_conversation
+                    conversation_id = (
+                        self._planner_bundle_conversations.get(plan.bundle_id)
+                        if plan.bundle_id is not None
+                        else None
+                    )
+                    conversation = (
+                        self._planner_conversations.get(conversation_id)
+                        if conversation_id is not None
+                        else None
+                    )
                     if (
                         conversation is not None
                         and plan.bundle_id == conversation.latest_bundle_id
@@ -698,12 +709,9 @@ class DataQuestionService:
             raise KnowledgeError("SAG Agent planner is unavailable")
 
         async with self._planner_lock:
-            conversation = self._planner_conversation
+            conversation_id: str | None = None
+            conversation: _PlannerConversation | None = None
             if retry_context is None:
-                if conversation is not None:
-                    raise DataQueryValidationError(
-                        "an Agent planner conversation already exists in the current run"
-                    )
                 rewritten = rewrite_planner_question(
                     question,
                     self._question_template,
@@ -712,14 +720,24 @@ class DataQuestionService:
                 messages: list[PlannerMessage] = [{"role": "user", "content": rewritten}]
                 attempt = 1
             else:
-                if conversation is None or conversation.pending_repair_context is None:
+                pending = [
+                    (candidate_id, candidate)
+                    for candidate_id, candidate in self._planner_conversations.items()
+                    if candidate.original_question == question
+                    and candidate.pending_repair_context is not None
+                ]
+                if not pending:
                     raise DataQueryValidationError(
                         "retryContext requires a failed Agent-planned query in the current run"
                     )
-                if question.strip() != conversation.original_question:
+                if len(pending) > 1:
                     raise DataQueryValidationError(
-                        "a planner correction must use the exact original question"
+                        "retryContext is ambiguous for multiple failed Agent-planned queries; "
+                        "start a new user turn"
                     )
+                conversation_id, conversation = pending[0]
+                stored_repair_context = conversation.pending_repair_context
+                assert stored_repair_context is not None
                 if conversation.attempt >= 3:
                     raise DataQueryValidationError(
                         "SAG Agent correction limit reached; start a new user turn"
@@ -730,7 +748,7 @@ class DataQuestionService:
                     {
                         "role": "user",
                         "content": bound_utf8(
-                            conversation.pending_repair_context,
+                            stored_repair_context,
                             MAX_RETRY_CONTEXT_BYTES,
                         ),
                     },
@@ -848,7 +866,8 @@ class DataQuestionService:
                 ),
             )
             if conversation is None:
-                self._planner_conversation = _PlannerConversation(
+                conversation_id = new_handle("conversation")
+                self._planner_conversations[conversation_id] = _PlannerConversation(
                     original_question=question.strip(),
                     messages=[*messages, {"role": "assistant", "content": answer}],
                     attempt=attempt,
@@ -862,6 +881,8 @@ class DataQuestionService:
                 conversation.attempt = attempt
                 conversation.latest_bundle_id = bundle_id
                 conversation.pending_repair_context = None
+            assert conversation_id is not None
+            self._planner_bundle_conversations[bundle_id] = conversation_id
             self._audit.append(
                 AuditRecord(
                     event="search",

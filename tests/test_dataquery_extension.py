@@ -286,11 +286,18 @@ class _BlockingFakeSqlPlanner(_FakeSqlPlanner):
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.active_calls = 0
+        self.max_active_calls = 0
 
     async def plan(self, messages, *, signal=None):
-        self.started.set()
-        await self.release.wait()
-        return await super().plan(messages, signal=signal)
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            self.started.set()
+            await self.release.wait()
+            return await super().plan(messages, signal=signal)
+        finally:
+            self.active_calls -= 1
 
 
 class _FailOnceQueryBackend(FakeQueryBackend):
@@ -369,7 +376,7 @@ def test_search_guideline_avoids_fragmented_sag_round_trips(tmp_path: Path, monk
     assert "stop" in guideline.lower()
 
 
-def test_agent_search_guideline_combines_multiple_dimensions_into_one_search(
+def test_agent_search_guideline_splits_multiple_dimensions_and_aggregates_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
@@ -395,8 +402,9 @@ def test_agent_search_guideline_combines_multiple_dimensions_into_one_search(
     guideline = "\n".join(search.prompt_guidelines)
 
     assert "multiple calibers, periods, or entities" in guideline
-    assert "exactly one data_knowledge_search call" in guideline
-    assert "Never issue one search per requested value" in guideline
+    assert "one data_knowledge_search call for each requested value" in guideline
+    assert "Do not mix evidence or SQL across bundles" in guideline
+    assert "aggregate the results" in guideline
 
 
 def test_unconfigured_extension_registers_no_tools(tmp_path: Path, monkeypatch) -> None:
@@ -1023,11 +1031,9 @@ async def test_agent_citation_without_chunk_id_is_visible_but_not_expandable(
     assert knowledge.read_calls == []
 
 
-async def test_concurrent_agent_planner_turns_cannot_interleave(
+async def test_concurrent_agent_planner_turns_are_serialized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tau_coding.dataquery.service import DataQueryValidationError
-
     planner = _BlockingFakeSqlPlanner()
     monkeypatch.setattr(
         "tau_coding.dataquery.extension._resolve_extension_config",
@@ -1068,9 +1074,12 @@ async def test_concurrent_agent_planner_turns_cannot_interleave(
     planner.release.set()
 
     assert (await first).text
-    with pytest.raises(DataQueryValidationError, match="already exists"):
-        await second
-    assert len(planner.calls) == 1
+    assert (await second).text
+    assert planner.max_active_calls == 1
+    assert planner.calls == [
+        [{"role": "user", "content": "参考知识库模板：first question"}],
+        [{"role": "user", "content": "参考知识库模板：second question"}],
+    ]
 
 
 async def test_search_tool_keeps_sag_exchange_in_display_only_details(

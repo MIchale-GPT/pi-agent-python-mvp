@@ -84,7 +84,7 @@ SAG 接入沿用 `PRD-sag-agent-sql-planner.md` 的 `agent` 模式契约：`POST
 5. **密钥永不进镜像**：`DWS password` 与 `SAG token` 仅来自 `TAU_SAG_TOKEN` 环境变量或只读挂载的 `~/.tau/credentials.json`（`dataquery.dws.password` / `dataquery.sag.token`）。
 6. **网络采用 `--network host`**：与 `sql-agent-loop/start.sh` 一致，省去端口映射与额外网桥；`tau` 容器常驻 `tail -f /dev/null`，交互用 `exec`。
 7. **SAG 路径问题用容器网络解决**：`tau` 加入 `sag` compose 网络后以 `http://api:8000` 直连，`TAU_SAG_AGENT_ORIGIN` 保持 `http://api:8000`（合法 origin），`TAU_SAG_ENDPOINT` 同理 `http://api:8000/mcp/` 用于 citation 展开。
-8. **保留 `agent` 模式完整契约**：一次重写提问 + citation 证据包 + 冻结 `planId` + 授权执行 + `retryContext` 同会话修正，不引入新工具名。
+8. **保留 `agent` 模式完整契约**：每个结果切片一次重写提问 + 独立 citation 证据包 + 冻结 `planId` + 授权执行 + `retryContext` 同会话修正；多口径、期间或实体可分别规划后汇总，不引入新工具名。
 9. **失败分类不变**：仅 DWS SQL 执行错误触发 `retryContext` 修正；鉴权/连接/缺 citation 等为不可重试错误。
 10. **可观测性不变**：`Ctrl+O` 展开真实 `sagExchange`（request/response/citations/attempt），`provider` thinking 由 `Ctrl+T` 控制。
 
