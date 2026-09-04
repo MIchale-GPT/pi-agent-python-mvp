@@ -122,6 +122,25 @@ can be expanded. These display-only details are persisted with the tool result,
 so the same card is available after `/resume`; tokens, passwords, and bound SQL
 parameter values are excluded.
 
+## Thinking output
+
+Tau hides streamed model thinking by default. Press **Ctrl+T** to show or hide
+thinking blocks, and press **Shift+Tab** to cycle the thinking level supported
+by the active provider/model. These are separate controls: the thinking level
+changes what Tau requests from the provider, while Ctrl+T only changes what the
+TUI displays.
+
+Some models expose a thinking level but do not return visible thinking tokens,
+and some providers do not support thinking at all. If Ctrl+T is enabled before
+the session has received any thinking output, Tau explains this limitation and
+points to the configured thinking-level shortcut. Tau cannot display reasoning
+that the provider did not send.
+
+SAG planner observability is separate from model thinking. The expanded SAG
+card shows requests, responses, citations, and correction attempts, but never
+claims to expose SAG's hidden chain-of-thought. **Ctrl+T** applies only to
+thinking content returned by Tau's active model provider.
+
 ## Long sessions
 
 Tau keeps long transcripts responsive by mounting only a window of messages in

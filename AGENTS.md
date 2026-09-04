@@ -79,3 +79,20 @@ Each substantial phase should leave behind beginner-friendly notes under `dev-no
 When a phase adds or changes user-facing behavior, also update the published docs
 under `website/content/` (the "Use Tau" guides and reference).
 
+## Agent skills
+
+### Issue tracker
+
+Implementation tickets use local Markdown under `.scratch/`; PRDs live under
+`docs/`. Nothing is published remotely. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Local tickets use the canonical states `needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, and `wontfix`. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Tau uses a single-context layout with root `CONTEXT.md` and ADRs under
+`dev-notes/adr/`. See `docs/agents/domain.md`.

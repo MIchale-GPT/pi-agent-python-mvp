@@ -143,6 +143,10 @@ translate supported reasoning streams into provider-neutral thinking events,
 `tau_agent` forwards those events without recording them as durable assistant
 messages, and the Textual TUI decides whether to show or hide them. The built-in
 TUI hides thinking tokens by default and exposes `Ctrl+T` as a frontend toggle.
+If the user enables the toggle before any thinking output has arrived, the TUI
+explains that the active model/provider must emit thinking and points to the
+configured thinking-cycle key. The toggle remains enabled so thinking that
+arrives later in the run becomes visible immediately.
 
 ## Tests
 

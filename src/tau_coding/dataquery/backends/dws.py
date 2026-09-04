@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
+import re
 import time
 from collections.abc import Sequence
 from contextlib import suppress
@@ -34,6 +36,8 @@ from tau_coding.dataquery.service import (
     QueryInfrastructureError,
     QuerySqlError,
 )
+
+logger = logging.getLogger(__name__)
 
 DRIVER_MISSING_MESSAGE = (
     "psycopg driver is not installed; install the optional dataquery dependency "
@@ -161,7 +165,19 @@ class DwsPostgresQueryBackend(QueryBackend):
         except QueryExecutionError:
             raise
         except Exception as exc:  # noqa: BLE001 - driver isolation
-            raise QuerySqlError(f"query failed: {type(exc).__name__}") from exc
+            error_detail = _extract_psycopg_error_detail(exc)
+            error_message = _sanitize_driver_error(
+                error_detail.get("message", ""),
+                secrets=(str(self._params.get("password") or ""),),
+            )
+            logger.warning(
+                "DWS query failed: sqlstate=%s message=%s sql=%s param_count=%s",
+                error_detail.get("sqlstate"),
+                error_message,
+                sql[:500] + "..." if len(sql) > 500 else sql,
+                len(params),
+            )
+            raise QuerySqlError(f"query failed: {type(exc).__name__}: {error_message}") from exc
 
     async def test_connection(self) -> tuple[int, str | None]:
         started = time.monotonic()
@@ -252,11 +268,16 @@ def _run_with_cursor(
     max_cell_bytes: int,
 ) -> QueryResult:
     _ensure_driver()
+    _rollback_connection(conn)
+    conn.read_only = True
     with conn.cursor() as cursor:
-        conn.read_only = True
         cursor.execute(f"SET LOCAL statement_timeout = '{timeout_seconds}s'")
         cursor.execute("SET LOCAL search_path = pg_catalog")
-        cursor.execute(sql, params)
+        # psycopg parses literal percent signs whenever a params argument is supplied.
+        if params:
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(sql)
         columns = [
             QueryColumn(name=column.name, type=str(column.type_code))
             for column in cursor.description or ()
@@ -286,6 +307,45 @@ def _cancel(conn: DriverConnection) -> None:
     """Interrupt a running statement from another thread (decision 17)."""
     with suppress(Exception):  # noqa: BLE001 - best-effort cancel
         conn.cancel()
+
+
+def _extract_psycopg_error_detail(exc: Exception) -> dict[str, str]:
+    detail: dict[str, str] = {}
+    for attr, key in (
+        ("sqlstate", "sqlstate"),
+        ("pgcode", "sqlstate"),
+        ("message", "message"),
+        ("pgerror", "message"),
+        ("diag.message_primary", "message"),
+    ):
+        value: object | None = None
+        if attr == "diag.message_primary":
+            diag = getattr(exc, "diag", None)
+            value = getattr(diag, "message_primary", None) if diag is not None else None
+        else:
+            value = getattr(exc, attr, None)
+        if isinstance(value, str) and value.strip() and key not in detail:
+            detail[key] = value.strip()
+    if "message" not in detail:
+        text = str(exc).strip()
+        if text:
+            detail["message"] = text
+    return detail
+
+
+def _sanitize_driver_error(text: str, *, secrets: Sequence[str]) -> str:
+    """Bound driver diagnostics without exposing credentials or parameter values."""
+    sanitized = text
+    for secret in secrets:
+        if secret:
+            sanitized = sanitized.replace(secret, "[redacted]")
+    sanitized = re.sub(
+        r"(?i)\b(?:password|passwd|pwd)\s*[:=]\s*\S+",
+        "[redacted]",
+        sanitized,
+    )
+    sanitized = re.sub(r"(://)([^/@\s]+)(@)", r"\1[redacted]\3", sanitized)
+    return sanitized or "database operation failed"
 
 
 def _adapt_cell(value: object) -> object:

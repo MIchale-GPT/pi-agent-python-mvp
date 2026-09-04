@@ -102,15 +102,20 @@ Date: 2026-08-24 · Status: approved design, pending implementation
 // 重放帧示例（SSE data 与 webtrace 行一致）
 {
   "type": "tool_execution_end",
-  "sessionId": "…", "runId": "…", "timestamp": 1756000000123,
+  "runId": "…", "timestamp": 1756000000123,
   "replay": true,          // 仅实时转发时缺省
   "result": { "output": "…" }
 }
 // 新增事件
-{ "type": "tool_authorization_resolved", "sessionId": "…", "runId": "…",
+{ "type": "tool_authorization_resolved", "runId": "…",
   "timestamp": 1756000000456, "requestId": "…", "toolCallId": "…",
   "decision": "allow" | "deny" | "cancel" | "timeout" | "no_subscriber" }
 ```
+
+会话事件与授权帧只带 `runId` + `timestamp`（由 `_trace_payload` 盖章），不含
+`sessionId`；只有 run 生命周期控制帧（`run_started`/`run_finished`/`run_error`/
+`cancel_requested`/`command_result`）与连接层帧（`web_connected`）显式携带
+`sessionId`。
 
 契约原则延续「只增不改」：旧字段全部保留，新字段对旧客户端无害。
 

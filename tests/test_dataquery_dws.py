@@ -137,6 +137,19 @@ async def test_execute_sets_up_read_only_transaction(fake_driver: FakePsycopg) -
     await backend.close()
 
 
+async def test_execute_omits_empty_params_for_sql_with_literal_percent(
+    fake_driver: FakePsycopg,
+) -> None:
+    backend = make_backend()
+    sql = 'SELECT 1 AS "同比增减率(%)" FROM myschema.orders'
+
+    await backend.execute(sql, [], **make_limits())
+
+    conn = fake_driver.connections[0]
+    assert (sql, None) in conn.executed
+    await backend.close()
+
+
 async def test_execute_rolls_back_after_driver_error(fake_driver: FakePsycopg) -> None:
     backend = make_backend()
     with pytest.raises(QueryExecutionError):

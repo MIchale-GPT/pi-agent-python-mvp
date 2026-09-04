@@ -4961,12 +4961,21 @@ class TauTuiApp(App[None]):
 
     def action_toggle_thinking(self) -> None:
         """Toggle thinking-token display in the transcript."""
-        self.state.toggle_thinking()
+        shown = self.state.toggle_thinking()
         transcript = self.query_one("#transcript", TranscriptView)
         transcript.update_thinking_visibility(
             self.state,
             theme=self.tui_settings.resolved_theme,
         )
+        has_thinking = any(
+            item.role == "thinking" and item.text.strip() for item in self.state.items
+        )
+        if shown and not has_thinking:
+            cycle_key = _key_hint(self.tui_settings.keybindings.thinking_cycle)
+            self._notify(
+                "No thinking output received. The active model/provider must emit thinking; "
+                f"use {cycle_key} to choose a thinking level."
+            )
 
     def _handle_session_picker_result(self, session_id: str | None) -> None:
         if session_id is None:

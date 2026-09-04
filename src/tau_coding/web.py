@@ -135,6 +135,8 @@ def _cache_busted_index_html(body: bytes, versions: dict[str, str]) -> bytes:
             f'src="/{name}?v={versions[name]}"',
         )
     return html.encode("utf-8")
+
+
 WebSessionLoader = Callable[
     [CodingSessionRecord, SessionManager],
     Awaitable["WebSessionHandle"],
@@ -846,6 +848,8 @@ class TauWebRuntime:
         record: CodingSessionRecord | None = None,
     ) -> None:
         published = "no_subscriber" if decision == "deny" else decision
+        if record is None:
+            record = self._manager.get_session(session_id)
         for pending in slot.pending_tool_authorizations.values():
             if pending.decision.done():
                 continue

@@ -365,6 +365,8 @@ def test_search_guideline_avoids_fragmented_sag_round_trips(tmp_path: Path, monk
     assert "Do not split" in guideline
     assert "direct answer itself is evidence" in guideline
     assert "do not call data_knowledge_read" in guideline
+    assert "0 rows" in guideline
+    assert "stop" in guideline.lower()
 
 
 def test_unconfigured_extension_registers_no_tools(tmp_path: Path, monkeypatch) -> None:

@@ -6890,6 +6890,28 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
 
 
 @pytest.mark.anyio
+async def test_tui_app_explains_when_no_thinking_output_is_available() -> None:
+    app = TauTuiApp(FakeSession())
+    notifications: list[str] = []
+
+    def fake_notify(message: str, **kwargs: object) -> None:
+        del kwargs
+        notifications.append(message)
+
+    app._notify = fake_notify  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+
+    assert app.state.show_thinking is True
+    assert notifications == [
+        "No thinking output received. The active model/provider must emit thinking; "
+        "use Shift+Tab to choose a thinking level."
+    ]
+
+
+@pytest.mark.anyio
 async def test_tui_app_hidden_thinking_placeholder_stays_before_streamed_answer() -> None:
     partial = AssistantMessage()
     session = FakeSession(

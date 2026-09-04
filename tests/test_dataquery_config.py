@@ -10,6 +10,7 @@ from tau_coding.credentials import FileCredentialStore, credentials_path
 from tau_coding.dataquery.config import (
     CREDENTIAL_DWS_PASSWORD,
     CREDENTIAL_SAG_TOKEN,
+    DEFAULT_SAG_AGENT_ID,
     ENV_DWS_HOST,
     ENV_DWS_MAX_ROWS,
     ENV_DWS_PORT,
@@ -41,7 +42,7 @@ def test_default_config_when_missing(paths: TauPaths) -> None:
     config = load_user_config(paths)
     assert config.planning_mode == "unconfigured"
     assert config.sag_agent_origin == ""
-    assert config.sag_agent_id == ""
+    assert config.sag_agent_id == DEFAULT_SAG_AGENT_ID
     assert config.sag_agent_timeout_seconds == 60
     assert config.sag_agent_answer_max_bytes == 64 * 1024
     assert config.sag_citation_limit == 5
@@ -191,6 +192,8 @@ def test_sag_integration_defaults_marked_as_default(
     resolved = resolve_data_query_config(paths, env={}, credentials=store)
     assert resolved.sag_source_id == "19d09d3733c34716bcdf906738d10b03"
     assert resolved.sources["sag_source_id"] == "default"
+    assert resolved.sag_agent_id == DEFAULT_SAG_AGENT_ID
+    assert resolved.sources["sag_agent_id"] == "default"
     assert resolved.sources["sag_search_tool"] == "default"
     assert resolved.sag_protocol_version == "2025-03-26"
     assert resolved.sag_rpc_timeout_seconds == 60

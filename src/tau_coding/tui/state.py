@@ -252,6 +252,7 @@ class TuiState:
             item.tool_result_text = result_text
             item.tool_result = result
             item.update_text = None
+            item.always_show_tool_result = is_error
             return
         item = ChatItem(
             role="tool",
@@ -259,6 +260,7 @@ class TuiState:
             tool_call_id=tool_call_id,
             tool_result_text=result_text,
             tool_result=result,
+            always_show_tool_result=is_error,
         )
         self.items.append(item)
         self._tool_items_by_call_id[tool_call_id] = item

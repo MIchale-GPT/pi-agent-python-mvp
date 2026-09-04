@@ -2728,6 +2728,95 @@ def test_disconnect_denied_authorization_is_visible_after_reconnect(tmp_path: Pa
         thread.join(timeout=2)
 
 
+def test_disconnect_denied_authorization_is_persisted_across_restart(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    record = manager.create_session(
+        cwd=cwd,
+        model="fake",
+        provider_name="fake",
+        title="Persisted disconnect deny session",
+        session_id="session-1",
+    )
+    provider = _ToolCallingFakeProvider()
+
+    async def load_session(
+        selected: CodingSessionRecord,
+        selected_manager: SessionManager,
+    ) -> WebSessionHandle:
+        return await _load_test_session(selected, selected_manager, provider)
+
+    server = create_web_server(
+        host="127.0.0.1",
+        port=0,
+        session_manager=manager,
+        session_loader=load_session,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    command_connection = HTTPConnection(host, port, timeout=2)
+    webtrace_path = record.path.with_name(record.path.stem + ".webtrace.jsonl")
+
+    try:
+        subscriber_id, subscriber = server.web_runtime.subscribe("session-1")
+        status, _payload = _post_json(
+            command_connection,
+            "/api/sessions/session-1/messages",
+            {"message": "Trigger authorization"},
+        )
+        assert status == 202
+        while True:
+            item = subscriber.get(timeout=1)
+            assert item is not None
+            if item.payload["type"] == "tool_authorization_requested":
+                break
+
+        # 断开唯一订阅者 → 未决授权被自动拒绝，resolved 帧必须落盘
+        server.web_runtime.unsubscribe("session-1", subscriber_id)
+        assert provider.finished.wait(timeout=1)
+    finally:
+        command_connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    persisted = [
+        json.loads(line)
+        for line in webtrace_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(
+        event["type"] == "tool_authorization_resolved" and event["decision"] == "no_subscriber"
+        for event in persisted
+    )
+
+    # —— 重启后的新 runtime 从磁盘回填 resolved 帧 ——
+    restarted = TauWebRuntime(manager, lambda *args: None)  # type: ignore[arg-type]
+
+    async def collect_backfill() -> list[dict[str, Any]]:
+        _subscriber_id, backfill = await restarted._subscribe(record.id)
+        events: list[dict[str, Any]] = []
+        while True:
+            item = backfill.get(timeout=1)
+            if item is None:
+                break
+            events.append(item.payload)
+            if item.payload["type"] == "tool_authorization_resolved":
+                break
+        return events
+
+    try:
+        replayed = asyncio.run(collect_backfill())
+    finally:
+        restarted.close()
+    assert any(
+        event["type"] == "tool_authorization_resolved" and event["decision"] == "no_subscriber"
+        for event in replayed
+    )
+
+
 def test_delete_api_refuses_to_remove_a_running_session(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     cwd = tmp_path / "project"
