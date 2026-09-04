@@ -77,6 +77,10 @@ is untrusted generated evidence—not executable authority. Tau's model still
 writes the final parameterized SQL, and prepare still validates its AST,
 allowlist, placeholders and current-run citation ids.
 
+When a request names multiple reporting calibers, periods, or entities, Tau
+keeps every requested value in that single SAG question instead of issuing one
+search per value.
+
 If DWS rejects the SQL statement, the tool error includes the frozen
 parameterized SQL and sanitized database error as a copyable `retryContext`.
 The extension—not the model—reconstructs the exact conversation as original

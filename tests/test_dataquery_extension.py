@@ -369,6 +369,36 @@ def test_search_guideline_avoids_fragmented_sag_round_trips(tmp_path: Path, monk
     assert "stop" in guideline.lower()
 
 
+def test_agent_search_guideline_combines_multiple_dimensions_into_one_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "tau_coding.dataquery.extension._resolve_extension_config",
+        lambda: _complete_resolved_config(planning_mode="agent"),
+    )
+    monkeypatch.setattr(
+        "tau_coding.dataquery.extension._create_backends",
+        lambda resolved: (
+            FakeKnowledgeBackend(DOCUMENTS),
+            FakeQueryBackend(table_rows=ROWS, columns=COLUMNS),
+            _FakeSqlPlanner(),
+        ),
+    )
+    runtime = ExtensionRuntime(ui=_TrueUiBridge())
+    runtime.load(
+        TauResourcePaths(root=tmp_path / ".tau", cwd=tmp_path),
+        extra_paths=_bundled_paths(),
+    )
+    search = next(
+        tool for tool in runtime.compose_tools([]) if tool.name == "data_knowledge_search"
+    )
+    guideline = "\n".join(search.prompt_guidelines)
+
+    assert "multiple calibers, periods, or entities" in guideline
+    assert "exactly one data_knowledge_search call" in guideline
+    assert "Never issue one search per requested value" in guideline
+
+
 def test_unconfigured_extension_registers_no_tools(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "tau_coding.dataquery.extension._resolve_extension_config",
