@@ -135,3 +135,24 @@ tables outside the allowlist. Every query is recorded in a bounded audit trail
   before execution; non-interactive print mode refuses unless
   `TAU_DATA_AUTO_APPROVE_EXECUTE=true` is explicitly set (it still logs the
   execution to stderr).
+
+## DWS 函数兼容
+
+只读查询以华为云 DWS 9.1.0.x 文档为语法依据。策略中的 DWS 函数清单位于
+`src/tau_coding/dataquery/dws_functions.py`，保留官方来源，扩展正则清洗、类型转换、
+日期计算、数学和统计聚合函数。`~`、`~*`、`!~`、`!~*` 按正则匹配检查；
+`TO_DATE`、`TO_CHAR`、`STRING_AGG` 等解析器内部别名按对应数据库函数检查。
+原始 SQL 不会因此被改写。
+
+允许函数不代表忽略参数类型或版本条件。当前仍使用 PostgreSQL 兼容解析器，
+尚非 DWS 全量语法实现；清单外函数和未识别语法会被拒绝。写入、DDL、锁定查询、
+系统管理、文件访问、跨库连接和未批准自定义函数仍禁止，业务表白名单继续生效。
+
+SAG 后台的“查询语法支持”页是策略生成的静态说明。两个仓库一起发布时，在 Tau 目录执行：
+
+```bash
+uv run python ../SAG/scripts/export-query-sql-support.py
+uv run python ../SAG/scripts/export-query-sql-support.py --check
+```
+
+生成页仅包含公开策略，不读取本地数据库地址、白名单内容或凭据。

@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlglot import tokenize
+from sqlglot import exp, parse_one
 from sqlglot.errors import SqlglotError
 
 from tau_agent.tools import ToolCancellationToken
@@ -619,10 +619,7 @@ class DataQuestionService:
                         if conversation_id is not None
                         else None
                     )
-                    if (
-                        conversation is not None
-                        and plan.bundle_id == conversation.latest_bundle_id
-                    ):
+                    if conversation is not None and plan.bundle_id == conversation.latest_bundle_id:
                         conversation.pending_repair_context = repair_context
             self._audit.append(
                 AuditRecord(
@@ -754,9 +751,7 @@ class DataQuestionService:
                     },
                 ]
                 attempt = conversation.attempt + 1
-            message_bytes = sum(
-                len(message["content"].encode("utf-8")) for message in messages
-            )
+            message_bytes = sum(len(message["content"].encode("utf-8")) for message in messages)
             output_reserve = min(
                 self._planner_answer_max_bytes + self._citation_snippet_max_bytes,
                 max(1, self._planner_transcript_max_bytes // 2),
@@ -816,12 +811,8 @@ class DataQuestionService:
                     min(self._citation_title_max_bytes, remaining_bytes),
                 )
                 remaining_bytes -= len(title.encode("utf-8"))
-                provider_id = (
-                    str(citation.provider_id).strip() if citation.provider_id else None
-                )
-                provider_source_id = (
-                    str(citation.source_id).strip() if citation.source_id else None
-                )
+                provider_id = str(citation.provider_id).strip() if citation.provider_id else None
+                provider_source_id = str(citation.source_id).strip() if citation.source_id else None
                 expandable = bool(provider_id) and self._citation_expansion_available
                 records.append(
                     EvidenceRecord(
@@ -859,8 +850,7 @@ class DataQuestionService:
                 total_bytes=min(
                     MAX_BUNDLE_BYTES,
                     sum(
-                        len(record.title.encode("utf-8"))
-                        + len(record.summary.encode("utf-8"))
+                        len(record.title.encode("utf-8")) + len(record.summary.encode("utf-8"))
                         for record in records
                     ),
                 ),
@@ -914,26 +904,17 @@ class DataQuestionService:
 
 
 def _count_positional_placeholders(sql: str) -> int:
-    """Count ``%s`` placeholders on the token stream and reject other forms.
-
-    String literals tokenize as single tokens, so a literal like ``'100%'``
-    does not count. Named (``%(name)s``) and dollar (``$1``) forms are rejected
-    because the query backend binds positionally.
-    """
+    """Count parsed parameters, not percent characters used by modulo or text."""
     try:
-        tokens = list(tokenize(sql, read="postgres"))
+        root = parse_one(sql, read="postgres")
     except SqlglotError as exc:
-        raise DataQueryValidationError("SQL tokenization failed") from exc
-    count = 0
-    for index, token in enumerate(tokens):
-        if token.text == "%":
-            if index + 1 < len(tokens) and tokens[index + 1].text == "s":
-                count += 1
-            else:
-                raise DataQueryValidationError("only %s positional placeholders are supported")
-        if token.text == "$":
-            raise DataQueryValidationError("dollar parameters ($1) are not supported")
-    return count
+        raise DataQueryValidationError("SQL parameter parsing failed") from exc
+    if next(root.find_all(exp.Parameter), None) is not None:
+        raise DataQueryValidationError("dollar parameters ($1) are not supported")
+    placeholders = list(root.find_all(exp.Placeholder))
+    if any(node.this is not None for node in placeholders):
+        raise DataQueryValidationError("only %s positional placeholders are supported")
+    return len(placeholders)
 
 
 def _is_json_value(value: object) -> bool:

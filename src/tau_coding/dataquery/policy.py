@@ -27,6 +27,7 @@ from sqlglot import exp, parse, tokenize
 from sqlglot.errors import SqlglotError
 
 from tau_coding.dataquery.config import DataQueryConfigError
+from tau_coding.dataquery.dws_functions import DWS_AST_FUNCTION_NAMES, DWS_FUNCTIONS
 
 # --- function policy (decision 10) ----------------------------------------
 
@@ -134,6 +135,8 @@ APPROVED_FUNCTIONS: frozenset[str] = frozenset(
         "GENERATE_SERIES",
     }
 )
+
+APPROVED_FUNCTIONS = APPROVED_FUNCTIONS | DWS_FUNCTIONS
 
 # Dangerous functions (denylist, decision 10). Even when the DB role cannot
 # actually execute them, they are rejected at the application layer.
@@ -444,4 +447,7 @@ class SqlPolicyChecker:
             raw = func.this
             if isinstance(raw, str):
                 return raw.strip().upper()
-        return func.sql_name().upper() or type(func).__name__.upper()
+        if isinstance(func, exp.Pad):
+            return "LPAD" if func.args.get("is_left") else "RPAD"
+        name = func.sql_name().upper() or type(func).__name__.upper()
+        return DWS_AST_FUNCTION_NAMES.get(name, name)

@@ -358,8 +358,7 @@ class TestPrepare:
         with pytest.raises(DataQueryValidationError, match="business SQL requires evidence"):
             service.prepare(
                 sql=(
-                    "SELECT region, COUNT(*) FROM myschema.orders "
-                    "WHERE region = %s GROUP BY region"
+                    "SELECT region, COUNT(*) FROM myschema.orders WHERE region = %s GROUP BY region"
                 ),
                 params=["east"],
                 evidence_ids=[],
@@ -669,10 +668,7 @@ class TestAgentPlannerConversation:
         assert len(exchange.response.encode("utf-8")) <= 30
         assert str(result["answer"]).endswith("…[truncated]")
         transcript_bytes = (
-            sum(
-                len(message["content"].encode("utf-8"))
-                for message in planner.calls[0]
-            )
+            sum(len(message["content"].encode("utf-8")) for message in planner.calls[0])
             + len(str(result["answer"]).encode("utf-8"))
             + len(citation["title"].encode("utf-8"))  # type: ignore[index,union-attr]
             + len(citation["snippet"].encode("utf-8"))  # type: ignore[index,union-attr]
@@ -718,12 +714,8 @@ class TestAgentPlannerConversation:
 
         assert bundles[0] != bundles[1]
         assert repaired_single["attempt"] == repaired_consolidated["attempt"] == 2
-        assert planner.calls[0] == [
-            {"role": "user", "content": f"Plan exactly: {questions[0]}"}
-        ]
-        assert planner.calls[1] == [
-            {"role": "user", "content": f"Plan exactly: {questions[1]}"}
-        ]
+        assert planner.calls[0] == [{"role": "user", "content": f"Plan exactly: {questions[0]}"}]
+        assert planner.calls[1] == [{"role": "user", "content": f"Plan exactly: {questions[1]}"}]
         assert planner.calls[2][0] == planner.calls[0][0]
         assert planner.calls[2][1] == {
             "role": "assistant",
@@ -837,9 +829,7 @@ class TestAgentPlannerConversation:
         second = await service.search("second question")
 
         assert second["attempt"] == 1
-        assert planner.calls[1] == [
-            {"role": "user", "content": "Plan exactly: second question"}
-        ]
+        assert planner.calls[1] == [{"role": "user", "content": "Plan exactly: second question"}]
 
     async def test_configured_agent_can_cite_any_of_its_financial_sources(self) -> None:
         planner = _CountingPlanner(source_id="source-returned-by-sag")
@@ -897,3 +887,28 @@ class TestLimits:
         assert result["rowCount"] == 2
         assert result["truncated"] is True
         assert result["truncationReasons"] == ["row_limit"]
+
+
+@pytest.mark.parametrize(
+    "sql, expected",
+    [
+        ("SELECT year_month % 100 FROM myschema.orders", 0),
+        ("SELECT amount % s FROM myschema.orders", 0),
+        ("SELECT amount % (100) FROM myschema.orders", 0),
+        ("SELECT '%' AS label, '%s' AS example FROM myschema.orders", 0),
+        ("SELECT * FROM myschema.orders WHERE region = %s", 1),
+        ("SELECT amount % 100 FROM myschema.orders WHERE region = %s", 1),
+    ],
+)
+def test_modulo_is_not_a_parameter(sql: str, expected: int) -> None:
+    from tau_coding.dataquery.service import _count_positional_placeholders
+
+    assert _count_positional_placeholders(sql) == expected
+
+
+@pytest.mark.parametrize("sql", ["SELECT $1", "SELECT %(name)s"])
+def test_unsupported_parameter_forms_remain_rejected(sql: str) -> None:
+    from tau_coding.dataquery.service import _count_positional_placeholders
+
+    with pytest.raises(DataQueryValidationError):
+        _count_positional_placeholders(sql)

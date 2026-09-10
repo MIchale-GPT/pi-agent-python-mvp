@@ -186,3 +186,59 @@ def test_allowed_objects_parse_rejects_invalid_entries() -> None:
 
     with pytest.raises(DataQueryConfigError):
         AllowedObjects.parse(["a.b.c"])
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "TRIM(region) ~ '^[(].*[)]$'",
+        "region ~* 'a'",
+        "region !~ 'a'",
+        "region !~* 'a'",
+        "regexp_like(region, 'a')",
+        "regexp_replace(region, ',', '', 'g')",
+        "regexp_matches(region, 'a')",
+        "regexp_substr(region, 'a')",
+        "TO_NUMBER(region, '999D99')",
+        "TRY_CAST(region AS numeric)",
+        "TO_DATE(region, 'YYYYMM')",
+        "TO_CHAR(amount, '999D99')",
+        "TO_TIMESTAMP(region, 'YYYYMMDD')",
+        "TO_TIMESTAMP(1234)",
+        "ADD_MONTHS(created_at, -1)",
+        "LAST_DAY(created_at)",
+        "LISTAGG(region, ',') WITHIN GROUP (ORDER BY region)",
+        "STRING_AGG(region, ',')",
+        "MEDIAN(amount)",
+        "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount)",
+        "LAG(amount) OVER (ORDER BY created_at)",
+        "ROUND(amount - LAG(amount) OVER (ORDER BY created_at), 2)",
+        "LPAD(region, 5, '0')",
+        "RPAD(region, 5, '0')",
+        "STRPOS(region, 'a')",
+        "JSON_AGG(region)",
+        "GENERATE_SERIES(1, 3)",
+        "VAR_POP(amount)",
+        "SIN(amount)",
+        "BIT_AND(amount)",
+        "POWER(amount, 2)",
+    ],
+)
+def test_documented_dws_functions_and_operator_aliases(expression: str) -> None:
+    report = checker().validate(f"SELECT {expression} FROM myschema.orders")
+    assert report.allowed, report.reason
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT regexp_like(pg_read_file('/etc/passwd'), 'a') FROM myschema.orders",
+        "SELECT regexp_replace(region, 'a', unknown_function()) FROM myschema.orders",
+        "SELECT other.regexp_like(region, 'a') FROM myschema.orders",
+        "SELECT regexp_like(region, 'a') FROM forbidden.orders",
+        "SELECT nextval('x') FROM myschema.orders",
+        "SELECT set_config('x','y',false) FROM myschema.orders",
+    ],
+)
+def test_dws_compatibility_does_not_bypass_policy(sql: str) -> None:
+    assert not checker().validate(sql).allowed
