@@ -2,10 +2,10 @@
 
 Tau uses a single-context domain-documentation layout.
 
-## Before exploring
+## When terminology or architecture matters
 
-- Read `CONTEXT.md` at the repository root when it exists.
-- Read relevant ADRs under `dev-notes/adr/`.
+- Read relevant terms in root `CONTEXT.md` when the task depends on domain language.
+- Read ADRs under `dev-notes/adr/` that constrain the proposed change.
 - If a referenced file does not exist, proceed silently. Domain-modeling
   workflows create or extend it when terminology or decisions are resolved.
 

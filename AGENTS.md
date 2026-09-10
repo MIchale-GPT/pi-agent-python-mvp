@@ -2,13 +2,11 @@
 
 Tau is a Python implementation of Pi's minimalist coding-agent harness architecture. The goal is to develop it incrementally, with each phase clearly documented and tested.
 
-## Project Roadmap
+## Current requirements
 
-The implementation roadmap is tracked in GitHub issue #1:
-
-- https://github.com/huggingface/tau/issues/1
-
-Use that issue as the primary reference for phase ordering and architectural intent.
+Use the user's task, local PRDs/tickets, and relevant ADRs for current scope.
+The original upstream roadmap is historical context for Pi's design, not the
+phase ordering for this SQL Agent workspace.
 
 ## Architecture Principles
 
@@ -34,20 +32,13 @@ Keep the core agent package independent of CLI, Textual, Rich rendering, session
 
 Use Textual for the full interactive TUI, but only behind an adapter boundary. The agent harness should emit events; UI layers should consume those events.
 
-Early phases should prioritize:
-
-1. print-mode CLI
-2. Rich renderers
-3. Textual interactive app
-
 Do not let Textual become a dependency of the reusable agent harness.
 
 ## Development Workflow
 
-- Work in small, documented phases.
-- Keep changes aligned with the roadmap issue.
+- Keep changes scoped to the current task and preserve the existing architecture.
 - Add or update docs when introducing architectural concepts.
-- Add tests for behavior before expanding features.
+- Verify changed behavior with focused tests; use test-first development when requested or helpful. Complete the checks required for the affected code.
 - Run tests and Python commands through `uv` (for example, `uv run pytest` or `uv run python ...`) so they use the project environment.
 - Prefer simple, explicit abstractions over framework-heavy designs.
 - Keep commits atomic: one coherent feature, fix, docs update, refactor, or cleanup per commit.
