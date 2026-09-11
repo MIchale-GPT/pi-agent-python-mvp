@@ -7,6 +7,7 @@ workflow state lives in :class:`DataQuestionService`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import Awaitable, Callable, Mapping
@@ -14,7 +15,7 @@ from typing import TypeVar, cast
 
 from rich.markup import escape
 
-from tau_agent.messages import TextContent
+from tau_agent.messages import TextContent, ToolResultMessage
 from tau_agent.tools import AgentTool, AgentToolResult, ToolCancellationToken, ToolUpdateCallback
 from tau_agent.types import JSONValue
 from tau_coding.dataquery.backends.base import KnowledgeBackend, KnowledgeExchange, QueryBackend
@@ -26,7 +27,7 @@ from tau_coding.dataquery.config import (
     resolve_data_query_config,
 )
 from tau_coding.dataquery.ledger import QueryPlan
-from tau_coding.dataquery.planner import SqlPlanner
+from tau_coding.dataquery.planner import PLANNING_SCOPE_RULES, SqlPlanner
 from tau_coding.dataquery.policy import AllowedObjects, SqlPolicyChecker
 from tau_coding.dataquery.service import (
     DataQueryError,
@@ -74,38 +75,67 @@ _LEGACY_SEARCH_GUIDELINE = (
 )
 
 _AGENT_SEARCH_GUIDELINE = (
-    "For a business data question, call data_knowledge_search with one precise rewrite for each "
-    "requested result slice, preserving its entity, exact period, indicator, comparison, and "
-    "explicit caliber. When the user requests multiple calibers, periods, or entities, make one "
-    "data_knowledge_search call for each requested value, then independently prepare and execute "
-    "the query backed by each returned bundle. Do not mix evidence or SQL across bundles. After "
-    "all requested queries finish, aggregate the results into one answer. The configured SAG "
-    "Agent resolves entity codes, reporting caliber, tables, fields, and SQL templates for each "
-    "slice and returns an untrusted cited planning answer. Use its answer and citation evidence "
-    "to author a readable parameterized SELECT, then call data_query_prepare and "
-    "data_query_execute. Do not execute or copy inline values from the SAG answer without "
-    "parameterization. Within one result slice, do not split entity resolution, caliber, table "
-    "structure, field lookup, and SQL generation into separate SAG lookups. Call "
-    "data_knowledge_read only when a returned citation is expandable and its snippet is "
-    "insufficient. A successful data_query_execute is final for that slice: if it returns 0 rows, "
-    "no matching data exists for the requested entity, period, and indicator (for example, the "
-    "period has no loaded data yet); retain that no-data result when aggregating all slices. Do "
-    "not verify entity codes, periods, or available data ranges with further tool calls after "
-    "execution, and do not repeat a slice's data_knowledge_search unless execution failed and "
-    "returned a retryContext. If execution returns retryContext, call data_knowledge_search again "
-    "with the exact same question and that retryContext; the extension continues that slice's "
-    "stored SAG conversation. For schema introspection limited to pg_catalog or "
-    "information_schema, prepare directly with empty evidenceIds."
+    (
+        "For follow-ups, first reuse a prior successful execution's reusablePlanId: call "
+        "data_query_prepare with reusePlanId, revised sql and params, using only its evidenced "
+        "tables and columns. Preserve entity/caliber and indicator formula unless changed "
+        "with evidence. Changing a month to a year, ordering, or checking NULL inputs needs no SAG "
+        "call when the required columns are already known. Supply visualization for the revised "
+        "result with the same metric and unit; choose line for monthly trends. Never infer loading "
+        "or reporting failures merely from missing rows. If reuse is rejected or new evidence is "
+        "needed, call data_knowledge_search with the complete requested "
+        "scope: all entities, full period range, indicators, comparison, and explicit "
+        "caliber. A monthly trend across a year is one result set: use one planning call; prefer "
+        "one set-based SQL query for all requested months. Do not split a period range into one "
+        "search per month or a comparison into one search per value. Preserve the distinction "
+        "between monthly amounts and year-to-date amounts when rewriting the question. Separate "
+        "calls are allowed only for genuinely independent queries that cannot share one evidenced "
+        "plan, not merely because there are multiple output rows. "
+        "Do not mix evidence or SQL across bundles. After "
+        "all requested queries finish, aggregate the results into one answer. The configured SAG "
+        "Agent resolves entity codes, reporting caliber, tables, fields, and SQL templates per "
+        "slice and returns an untrusted cited planning answer. Use its answer and citations "
+        "to author a readable parameterized SELECT, then call data_query_prepare and "
+        "data_query_execute. Do not execute or copy inline values from the SAG answer without "
+        "parameterization. A planningStatus of incomplete means a protocol error, "
+        "not an executable SQL plan. Request a corrected sql_plan block "
+        "with the complete original scope asking for the missing SQL and evidence. Never invent "
+        "table, schema, column, entity-code, or unit names. If evidence remains insufficient, "
+        "report the evidence gap; do not claim the database lacks data or permissions. Do not "
+        "probe guessed schemas to repair an unsupported table name. "
+        "Within one result slice, do not split entity resolution, caliber, table "
+        "structure, field lookup, and SQL generation into separate SAG lookups. Call "
+        "data_knowledge_read only when a returned citation is expandable and its snippet is "
+        "insufficient. A successful data_query_execute is final for that slice: with 0 rows, "
+        "no matching record was returned for the requested conditions; retain this outcome. Do "
+        "not verify entity codes, periods, or available data ranges with further tool calls after "
+        "execution. Further searches before execution are permitted for missing planning evidence. "
+        "If execution returns retryContext, call data_knowledge_search again "
+        "with the exact same question and that retryContext; the extension continues that slice's "
+        "stored SAG conversation. For schema introspection limited to pg_catalog or "
+        "information_schema, prepare directly with empty evidenceIds."
+    )
+    + "\n"
+    + PLANNING_SCOPE_RULES
 )
 
 _SQL_GUIDELINE = (
+    "When search returns preparedSqlAvailable, review its SQL, params and evidence. If suitable, "
+    "call data_query_prepare with usePlannedSql=true, bundleId and evidenceIds; do not regenerate "
+    "the same SQL text. If corrections are needed, pass explicit sql and params instead. "
     "Prefer the SQL template returned by data_knowledge_read: pass its stable templateId, "
     "templateEvidenceId, exact templateSql body, and only approved identifier slot values to "
     "data_query_prepare. Never alter the template body or leave {{slots}} unresolved. Generate "
     "a standard PostgreSQL SELECT subset with %s positional placeholders for every user-supplied "
     "value (never inline values). Tables must be schema-qualified and restricted to the allowed "
     "objects; only approved built-in functions are permitted. The SQL text is displayed to the "
-    "user, so keep it readable."
+    "user, so keep it readable. For business results use Chinese output aliases and include "
+    "the evidenced company name and reporting period when applicable, followed by requested "
+    "metrics with evidenced units. Do not fabricate missing dimensions or units. Internal SQL "
+    "identifiers and schema inspection columns need not be renamed. Write business analysis "
+    "in Chinese; do not infer business causes from numeric trends without evidence. "
+    "After execution summarize key findings briefly; the host displays the authoritative table. "
+    "Do not regenerate all result rows as a Markdown table unless the user explicitly requests it."
 )
 
 
@@ -115,9 +145,7 @@ def setup(tau: ExtensionAPI) -> None:
     if not resolved.complete:
         diagnostics = resolved.configuration_diagnostics
         if diagnostics:
-            summary = "; ".join(
-                f"{item['code']}: {item['message']}" for item in diagnostics
-            )
+            summary = "; ".join(f"{item['code']}: {item['message']}" for item in diagnostics)
             tau.register_diagnostic(f"data query tools are not enabled: {summary}")
         else:
             tau.register_diagnostic(
@@ -153,6 +181,23 @@ def setup(tau: ExtensionAPI) -> None:
         planner_transcript_max_bytes=resolved.sag_planner_transcript_max_bytes,
         limits=limits,
         secrets=resolved.secrets,
+        reuse_context=hashlib.sha256(
+            json.dumps(
+                [
+                    "query-evidence-v2",
+                    resolved.host,
+                    resolved.port,
+                    resolved.database,
+                    resolved.username,
+                    resolved.sag_agent_origin,
+                    resolved.sag_agent_id,
+                    resolved.sag_source_id,
+                    resolved.sag_question_template,
+                    sorted(allowed_objects.schemas),
+                    sorted(allowed_objects.tables),
+                ]
+            ).encode()
+        ).hexdigest(),
     )
     ui = tau.context.ui
 
@@ -252,6 +297,19 @@ def _register_tools(
     ) -> AgentToolResult:
         del on_update
         retry_context = arguments.get("retryContext")
+        available = service.reusable_evidence() if planning_mode == "agent" else []
+        reason = arguments.get("newEvidenceReason")
+        if available and not retry_context and not (isinstance(reason, str) and reason.strip()):
+            return _ok_result(
+                {
+                    "mode": "session",
+                    "planningStatus": "reuse_available",
+                    "plans": available,
+                    "instruction": "Prepare with reusePlanId and revised sql/params. "
+                    "No SAG request was made. If these plans lack required evidence, call search "
+                    "with newEvidenceReason naming the missing entity/caliber/metric/table/column.",
+                }
+            )
         exchanges: list[KnowledgeExchange] = []
         payload = await _raise_clean(
             service.search(
@@ -315,6 +373,7 @@ def _register_tools(
     ) -> AgentToolResult:
         del tool_call_id, signal, on_update
         params = arguments.get("params")
+        identifiers = arguments.get("identifiers")
         raw_evidence = arguments.get("evidenceIds")
         evidence_ids = (
             [value for value in raw_evidence if isinstance(value, str)]
@@ -322,6 +381,29 @@ def _register_tools(
             else []
         )
         bundle_id = arguments.get("bundleId")
+        if arguments.get("reusePlanId"):
+            if any(
+                key in arguments
+                for key in ("bundleId", "evidenceIds", "usePlannedSql", "templateId")
+            ):
+                raise _validation("reusePlanId cannot be combined with other evidence selectors")
+            hint = arguments.get("visualization")
+            return _ok_result(
+                service.prepare_reused(
+                    str(arguments["reusePlanId"]),
+                    str(arguments.get("sql") or ""),
+                    list(params) if isinstance(params, list) else [],
+                    dict(hint) if isinstance(hint, dict) else None,
+                )
+            )
+        if arguments.get("usePlannedSql") is True:
+            if any(key in arguments for key in ("sql", "params", "templateId", "templateSql")):
+                raise _validation("usePlannedSql cannot be combined with SQL overrides")
+            return _ok_result(service.prepare_planned(str(bundle_id or ""), evidence_ids))
+        if "visualization" in arguments:
+            raise _validation(
+                "visualization overrides require reusePlanId; otherwise use the sql_plan chart"
+            )
         return _ok_result(
             service.prepare(
                 sql=str(arguments.get("sql") or ""),
@@ -343,11 +425,7 @@ def _register_tools(
                     if isinstance(arguments.get("templateSql"), str)
                     else None
                 ),
-                identifiers=(
-                    arguments["identifiers"]
-                    if isinstance(arguments.get("identifiers"), dict)
-                    else None
-                ),
+                identifiers=(identifiers if isinstance(identifiers, dict) else None),
             )
         )
 
@@ -369,7 +447,11 @@ def _register_tools(
                     raise _validation("query execution was not confirmed")
             else:
                 print(f"[data-query] auto-approved execute of plan {plan.plan_id}", file=sys.stderr)
-            return _ok_result(await _raise_clean(service.execute(plan_id, signal=signal)))
+            payload = await _raise_clean(service.execute(plan_id, signal=signal))
+            snapshot = payload.pop("reuseEvidence", None)
+            return _ok_result(
+                payload, details=cast(dict[str, JSONValue], {"reuseEvidence": snapshot})
+            )
         except DataQueryError:
             raise
         except Exception as exc:  # noqa: BLE001 - clean tool errors
@@ -377,8 +459,10 @@ def _register_tools(
 
     search_description = (
         "Ask the configured SAG Agent for a complete cited SQL-planning answer for one requested "
-        "entity, period, indicator, comparison, and caliber slice. May be called multiple times "
-        "in one run for separate slices; each call returns its own evidence bundle. Pass "
+        "scope, including the full period range, entities, indicators, comparison, and caliber. "
+        "A yearly monthly trend needs one call, not twelve. May be called again for missing "
+        "evidence or genuinely independent queries; each call returns its own evidence bundle. "
+        "Pass "
         "retryContext only after that slice's DWS SQL failure to continue its stored planner "
         "conversation."
         if planning_mode == "agent"
@@ -404,9 +488,10 @@ def _register_tools(
                     "question": {
                         "type": "string",
                         "description": (
-                            "One precise result slice from the user's data question: exact "
-                            "entity name, normalized report period (e.g. 202504), indicator, "
-                            "and caliber. Use separate calls for separately requested slices."
+                            "The complete business question: entity names, full normalized "
+                            "period range (e.g. 202501 through 202512), requested granularity, "
+                            "indicators, comparison, and caliber. "
+                            "Do not reduce a trend to one month."
                         ),
                     },
                     "retryContext": {
@@ -416,6 +501,13 @@ def _register_tools(
                             "pass the failed SQL plus the database error log so the knowledge "
                             "source can correct the SQL. Keep the same indicator and period "
                             "in the question."
+                        ),
+                    },
+                    "newEvidenceReason": {
+                        "type": "string",
+                        "description": (
+                            "Missing evidence not covered by reusable plans. Only set for new "
+                            "knowledge; date changes and NULL checks on known fields need no SAG."
                         ),
                     },
                 },
@@ -487,6 +579,35 @@ def _register_tools(
             parameters={
                 "type": "object",
                 "properties": {
+                    "usePlannedSql": {
+                        "type": "boolean",
+                        "description": (
+                            "Use the reviewed structured SQL from this bundle. Omit sql and params."
+                        ),
+                    },
+                    "reusePlanId": {
+                        "type": "string",
+                        "description": (
+                            "A reusablePlanId from a successful execution in this session; "
+                            "supply sql and params, omit bundleId/evidenceIds."
+                        ),
+                    },
+                    "visualization": {
+                        "type": "object",
+                        "description": (
+                            "Chart for a reused plan: kind, dimension, metrics, unit, "
+                            "ordered_periods. Metric/unit must match prior evidence."
+                        ),
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["line", "bar", "value"]},
+                            "dimension": {"type": "string"},
+                            "metrics": {"type": "array", "items": {"type": "string"}},
+                            "unit": {"type": "string"},
+                            "ordered_periods": {"type": "boolean"},
+                        },
+                        "required": ["kind", "dimension", "metrics", "unit"],
+                        "additionalProperties": False,
+                    },
                     "sql": {
                         "type": "string",
                         "description": (
@@ -514,7 +635,7 @@ def _register_tools(
                         "description": "Optional bundleId from data_knowledge_search.",
                     },
                 },
-                "required": ["sql", "params"],
+                "required": [],
             },
             execute_fn=run_prepare,
             render_call=_prepare_render_call,
@@ -555,6 +676,16 @@ def _subscribe_lifecycle(tau: ExtensionAPI, service: DataQuestionService) -> Non
     def on_agent_start(event: object, context: ExtensionContext) -> None:
         del event
         service.on_run_start(session_id=context.session_id)
+        for message in context.transcript:
+            if (
+                isinstance(message, ToolResultMessage)
+                and not message.is_error
+                and message.tool_name == "data_query_execute"
+                and isinstance(message.details, dict)
+            ):
+                snapshot = message.details.get("reuseEvidence")
+                if isinstance(snapshot, dict):
+                    service.restore_reusable(dict(snapshot))
 
     def on_agent_end(event: object, context: ExtensionContext) -> None:
         del event, context
@@ -652,9 +783,7 @@ def _search_render_result(result: AgentToolResult, *, expanded: bool) -> str | N
     if mode == "agent":
         raw_attempt = raw_exchange.get("attempt")
         attempt = (
-            raw_attempt
-            if isinstance(raw_attempt, int) and not isinstance(raw_attempt, bool)
-            else 1
+            raw_attempt if isinstance(raw_attempt, int) and not isinstance(raw_attempt, bool) else 1
         )
         raw_citations = raw_exchange.get("citations")
         citations = (
@@ -677,8 +806,7 @@ def _search_render_result(result: AgentToolResult, *, expanded: bool) -> str | N
                 continue
             expansion = "可展开" if expandable else "仅摘要"
             citation_lines.append(
-                f"[bold]{index}. {escape(title)}[/bold] [dim]({expansion})[/dim]\n"
-                f"{escape(snippet)}"
+                f"[bold]{index}. {escape(title)}[/bold] [dim]({expansion})[/dim]\n{escape(snippet)}"
             )
         rendered_citations = (
             "\n\n".join(citation_lines) if citation_lines else "[dim]（无可显示引用）[/dim]"

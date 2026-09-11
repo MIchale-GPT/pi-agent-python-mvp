@@ -16,6 +16,7 @@ Every handle is opaque and run-scoped; stale or guessed handles fail closed.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -51,7 +52,10 @@ from tau_coding.dataquery.planner import (
     PlannerMessage,
     SqlPlanner,
     bound_utf8,
+    bound_visualization,
+    planning_warning,
     rewrite_planner_question,
+    structured_plan,
 )
 from tau_coding.dataquery.policy import SqlPolicyChecker, is_schema_introspection_query
 
@@ -190,6 +194,7 @@ class DataQuestionService:
         secrets: DataQuerySecrets | None = None,
         audit: list[AuditRecord] | None = None,
         clock: Callable[[], int] | None = None,
+        reuse_context: str = "",
     ) -> None:
         self._knowledge = knowledge
         self._citation_expansion_available = bool(
@@ -217,6 +222,10 @@ class DataQuestionService:
         self._planner_lock = asyncio.Lock()
         self._planner_conversations: dict[str, _PlannerConversation] = {}
         self._planner_bundle_conversations: dict[str, str] = {}
+        self._planner_answers: dict[str, str] = {}
+        self._reuse_context = reuse_context
+        self._reusable: dict[str, dict[str, object]] = {}
+        self._reuse_parents: dict[str, dict[str, object]] = {}
 
     # -- run scope -----------------------------------------------------------
 
@@ -228,10 +237,93 @@ class DataQuestionService:
         self._template_reads.clear()
         self._planner_conversations.clear()
         self._planner_bundle_conversations.clear()
+        self._planner_answers.clear()
+        self._reusable.clear()
+        self._reuse_parents.clear()
+
+    def restore_reusable(self, snapshot: dict[str, object]) -> None:
+        """Accept only host-owned successful tool results, never user/assistant text."""
+        created = snapshot.get("createdMs")
+        if (
+            snapshot.get("sessionId") != self.scope.session_id
+            or snapshot.get("context") != self._reuse_context
+            or not self._reuse_context
+            or not isinstance(created, int)
+            or not 0 <= self._clock() - created <= 3600000
+        ):
+            return
+        plan_id = snapshot.get("planId")
+        if isinstance(plan_id, str):
+            self._reusable[plan_id] = snapshot
+
+    def prepare_reused(
+        self,
+        plan_id: str,
+        sql: str,
+        params: list[object],
+        visualization: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        from tau_coding.dataquery.reuse import validate_reuse_sql
+
+        snapshot = self._reusable.get(plan_id)
+        if snapshot is None or self._clock() - int(str(snapshot["createdMs"])) > 3600000:
+            raise DataQueryValidationError(
+                "Prior plan evidence unavailable or expired; request SAG evidence"
+            )
+        try:
+            validate_reuse_sql(str(snapshot["sql"]), sql)
+        except Exception as exc:
+            raise DataQueryValidationError(f"Follow-up evidence rejected: {exc}") from exc
+        records = [
+            EvidenceRecord(
+                evidence_id=new_handle("evidence"),
+                title="Prior successful SQL",
+                summary=str(snapshot["sql"]),
+                expandable=False,
+            )
+        ]
+        bundle = self._ledger.register_evidence(
+            records, total_bytes=len(str(snapshot["sql"]).encode())
+        )
+        # A derived plan has the same single protocol as an upstream plan.
+        candidate: dict[str, object] = {"sql": sql, "params": params}
+        if visualization is not None:
+            old = snapshot.get("visualization")
+            if (
+                not isinstance(old, dict)
+                or visualization.get("unit") != old.get("unit")
+                or visualization.get("metrics") != old.get("metrics")
+            ):
+                raise DataQueryValidationError("Changed metric or unit requires new SAG evidence")
+            from tau_coding.dataquery.reuse import validate_reused_metrics
+
+            try:
+                validate_reused_metrics(str(snapshot["sql"]), sql, old["metrics"])
+            except ValueError as exc:
+                raise DataQueryValidationError(str(exc)) from exc
+            candidate["visualization"] = visualization
+        self._planner_answers[bundle] = "```sql_plan\n" + json.dumps(candidate) + "\n```"
+        self._reuse_parents[bundle] = snapshot
+        return self.prepare(
+            sql=sql, params=params, bundle_id=bundle, evidence_ids=[records[0].evidence_id]
+        )
 
     def on_run_end(self) -> None:
         """End the run; scoped state is dropped on the next run start."""
         self._plans.reset_scope()
+
+    def reusable_evidence(self) -> list[dict[str, object]]:
+        """Bounded model-visible index of currently usable, host-owned evidence."""
+        return [
+            {
+                "reusePlanId": item["planId"],
+                "sql": item["sql"],
+                "params": item.get("params", []),
+                "visualization": item.get("visualization"),
+            }
+            for item in list(self._reusable.values())[-3:]
+            if 0 <= self._clock() - int(str(item["createdMs"])) <= 3600000
+        ]
 
     @property
     def scope(self) -> RunScope:
@@ -383,6 +475,16 @@ class DataQuestionService:
         )
         return {"bundleId": bundle.bundle_id, "evidenceId": evidence_id, "content": content.content}
 
+    def prepare_planned(self, bundle_id: str, evidence_ids: list[str]) -> dict[str, object]:
+        """Reuse planner text without bypassing normal evidence and SQL policy validation."""
+        answer = self._planner_answers.get(bundle_id)
+        candidate = structured_plan(answer) if answer else None
+        if candidate is None:
+            raise DataQueryValidationError("No structured SQL plan in this run's evidence bundle")
+        sql, params = candidate["sql"], candidate["params"]
+        assert isinstance(sql, str) and isinstance(params, list)
+        return self.prepare(sql=sql, params=params, evidence_ids=evidence_ids, bundle_id=bundle_id)
+
     def prepare(
         self,
         *,
@@ -444,6 +546,19 @@ class DataQuestionService:
             raise DataQueryValidationError(
                 "business SQL requires evidence from the current knowledge bundle"
             )
+        if self._planning_mode == "agent" and bundle is not None:
+            candidate = structured_plan(self._planner_answers.get(bundle.bundle_id, ""))
+            if candidate is None:
+                raise DataQueryValidationError(
+                    "SQL planner protocol error: valid sql_plan required before prepare"
+                )
+            if sql != candidate["sql"]:
+                from tau_coding.dataquery.reuse import validate_reuse_sql
+
+                try:
+                    validate_reuse_sql(str(candidate["sql"]), sql)
+                except Exception as exc:
+                    raise DataQueryValidationError(f"SQL evidence rejected: {exc}") from exc
 
         placeholder_count = _count_positional_placeholders(sql)
         if placeholder_count != len(params):
@@ -651,6 +766,9 @@ class DataQuestionService:
             )
         )
         empty_result = len(result.rows) == 0
+        visualization = bound_visualization(
+            self._planner_answers.get(plan.bundle_id or "", ""), plan.sql, plan.params
+        )
         payload = {
             "sql": plan.sql,
             "columns": [column.name for column in result.columns],
@@ -665,6 +783,24 @@ class DataQuestionService:
             "evidenceIds": list(plan.evidence_ids),
             "policyVersion": plan.policy_version,
         }
+        if visualization is not None:
+            payload["visualization"] = visualization
+        if self._reuse_context and plan.bundle_id and not empty_result and not result.truncated:
+            parent = self._reuse_parents.get(plan.bundle_id, {})
+            snapshot: dict[str, object] = {
+                "planId": plan.plan_id,
+                "sessionId": self.scope.session_id,
+                "context": self._reuse_context,
+                "createdMs": parent.get("createdMs", self._clock()),
+                "sql": plan.sql,
+                "params": list(plan.params),
+                "visualization": visualization,
+                "sourceEvidenceIds": parent.get("sourceEvidenceIds", list(plan.evidence_ids)),
+                "parentPlanId": parent.get("planId"),
+            }
+            self._reusable[plan.plan_id] = snapshot
+            payload["reusablePlanId"] = plan.plan_id
+            payload["reuseEvidence"] = snapshot
         if empty_result:
             payload["terminalMessage"] = (
                 "The query returned no matching records for the requested entity, period, and "
@@ -873,6 +1009,7 @@ class DataQuestionService:
                 conversation.pending_repair_context = None
             assert conversation_id is not None
             self._planner_bundle_conversations[bundle_id] = conversation_id
+            self._planner_answers[bundle_id] = answer
             self._audit.append(
                 AuditRecord(
                     event="search",
@@ -888,7 +1025,7 @@ class DataQuestionService:
             )
             if on_exchange is not None:
                 on_exchange(KnowledgeExchange(request=request, response=response))
-            return {
+            result: dict[str, object] = {
                 "type": "plan_query",
                 "mode": "agent",
                 "attempt": attempt,
@@ -896,6 +1033,12 @@ class DataQuestionService:
                 "answer": answer,
                 "citations": citations,
             }
+            warning = planning_warning(answer)
+            if structured_plan(answer) is not None:
+                result["preparedSqlAvailable"] = True
+            if warning is not None:
+                result.update(planningStatus="incomplete", planningWarning=warning)
+            return result
 
 
 # ---------------------------------------------------------------------------

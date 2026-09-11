@@ -73,6 +73,7 @@ async def test_plan_uses_captured_chat_contract_and_maps_citations() -> None:
             {"role": "user", "content": "SQL 与脱敏 DWS 错误"},
         ],
         "stream": False,
+        "sag_sql_planning": True,
     }
     assert result.answer == "<redacted:content>"
     assert result.request == request.content.decode("utf-8")

@@ -253,9 +253,23 @@ def _probe(conn: DriverConnection, probe_query: str = "SELECT 1") -> None:
             cursor.execute(probe_query)
             cursor.fetchone()
     except Exception as exc:  # noqa: BLE001 - driver isolation
-        raise QueryInfrastructureError(
-            f"connection probe failed: {type(exc).__name__}"
-        ) from exc
+        raise QueryInfrastructureError(f"connection probe failed: {type(exc).__name__}") from exc
+
+
+def _driver_sql(sql: str) -> str:
+    """Escape literal percent signs only at the psycopg binding boundary."""
+    from sqlglot import Tokenizer
+
+    tokens = Tokenizer(dialect="postgres").tokenize(sql)
+    placeholders = {
+        a.start
+        for a, b in zip(tokens, tokens[1:], strict=False)
+        if a.text == "%" and b.text == "s" and a.end + 1 == b.start
+    }
+    return "".join(
+        "%%" if char == "%" and index not in placeholders else char
+        for index, char in enumerate(sql)
+    )
 
 
 def _run_with_cursor(
@@ -275,7 +289,7 @@ def _run_with_cursor(
         cursor.execute("SET LOCAL search_path = pg_catalog")
         # psycopg parses literal percent signs whenever a params argument is supplied.
         if params:
-            cursor.execute(sql, params)
+            cursor.execute(_driver_sql(sql), params)
         else:
             cursor.execute(sql)
         columns = [

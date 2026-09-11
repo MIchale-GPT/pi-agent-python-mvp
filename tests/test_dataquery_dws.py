@@ -150,6 +150,15 @@ async def test_execute_omits_empty_params_for_sql_with_literal_percent(
     await backend.close()
 
 
+def test_driver_percent_escaping_preserves_real_placeholders():
+    from tau_coding.dataquery.backends.dws import _driver_sql
+
+    sql = "SELECT amount AS \"ratio(%)\", '%s', amount % 2 FROM t WHERE id = %s"
+    assert _driver_sql(sql) == (
+        "SELECT amount AS \"ratio(%%)\", '%%s', amount %% 2 FROM t WHERE id = %s"
+    )
+
+
 async def test_execute_rolls_back_after_driver_error(fake_driver: FakePsycopg) -> None:
     backend = make_backend()
     with pytest.raises(QueryExecutionError):

@@ -118,3 +118,10 @@ def test_serialize_cell_handles_common_types() -> None:
     assert serialize_cell(1.5) == "1.5"
     assert serialize_cell("text") == "text"
     assert serialize_cell({"a": 1}) == '{"a": 1}'
+
+
+def test_result_protocol_preserves_null_distinct_from_literal_null_text():
+    result = truncate_result_rows(
+        [[None, "NULL", 0]], max_rows=10, max_result_bytes=100, max_cell_bytes=10
+    )
+    assert result.rows == [[None, "NULL", "0"]]

@@ -1639,6 +1639,7 @@ class CodingSession:
         source: Literal["interactive", "extension"] = "interactive",
         custom_type: str | None = None,
         details: dict[str, JSONValue] | None = None,
+        expand_templates: bool = True,
     ) -> AsyncIterator[CodingSessionEvent]:
         """Append a user prompt, run the agent, and persist new messages.
 
@@ -1647,6 +1648,7 @@ class CodingSession:
         message that starts an idle session's turn). ``source`` marks who
         initiated the turn for the `input` hook (``"extension"`` when an
         extension started it, ``"interactive"`` otherwise).
+        ``expand_templates=False`` preserves literal questions from non-coding hosts.
         """
         context = self._diagnostic_context()
         input_outcome = await self._extension_runtime.run_input_hooks(
@@ -1658,7 +1660,7 @@ class CodingSession:
             return
         content = input_outcome.text
         try:
-            expanded_content = self.expand_prompt_text(content)
+            expanded_content = self.expand_prompt_text(content) if expand_templates else content
         except ResourceError:
             raise
         except Exception as exc:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from tau_coding.dataquery.backends.fake import FakeKnowledgeBackend, FakeQueryBa
 from tau_coding.dataquery.backends.unavailable import UnavailableKnowledgeBackend
 from tau_coding.dataquery.config import DataQuerySecrets
 from tau_coding.dataquery.ledger import LedgerError
+from tau_coding.dataquery.planner import PLANNING_SCOPE_RULES
 from tau_coding.dataquery.policy import AllowedObjects, SqlPolicyChecker
 from tau_coding.dataquery.service import (
     DataQueryValidationError,
@@ -203,6 +205,14 @@ def valid_sql() -> str:
     )
 
 
+def _counting_plan(attempt: int) -> str:
+    return (
+        "```sql_plan\n"
+        + json.dumps({"sql": f"SELECT amount_{attempt} FROM myschema.orders", "params": []})
+        + "\n```"
+    )
+
+
 class _CountingPlanner:
     def __init__(self, *, source_id: str | None = None) -> None:
         self.calls: list[list[dict[str, str]]] = []
@@ -213,7 +223,7 @@ class _CountingPlanner:
         self.calls.append(list(messages))
         attempt = len(self.calls)
         return SimpleNamespace(
-            answer=f"SELECT amount_{attempt} FROM myschema.orders",
+            answer=_counting_plan(attempt),
             citations=(
                 SimpleNamespace(
                     provider_id=f"chunk-{attempt}",
@@ -689,8 +699,8 @@ class TestAgentPlannerConversation:
             "杭锦旗西部能源开发有限公司2024年4月合并口径负债合计",
         )
         failed_sql = (
-            "SELECT amount_single FROM myschema.orders",
-            "SELECT amount_consolidated FROM myschema.orders",
+            "SELECT amount_1 FROM myschema.orders",
+            "SELECT amount_2 FROM myschema.orders",
         )
 
         bundles: list[str] = []
@@ -714,18 +724,22 @@ class TestAgentPlannerConversation:
 
         assert bundles[0] != bundles[1]
         assert repaired_single["attempt"] == repaired_consolidated["attempt"] == 2
-        assert planner.calls[0] == [{"role": "user", "content": f"Plan exactly: {questions[0]}"}]
-        assert planner.calls[1] == [{"role": "user", "content": f"Plan exactly: {questions[1]}"}]
+        assert planner.calls[0] == [
+            {"role": "user", "content": f"{PLANNING_SCOPE_RULES}\n\nPlan exactly: {questions[0]}"}
+        ]
+        assert planner.calls[1] == [
+            {"role": "user", "content": f"{PLANNING_SCOPE_RULES}\n\nPlan exactly: {questions[1]}"}
+        ]
         assert planner.calls[2][0] == planner.calls[0][0]
         assert planner.calls[2][1] == {
             "role": "assistant",
-            "content": "SELECT amount_1 FROM myschema.orders",
+            "content": _counting_plan(1),
         }
         assert failed_sql[0] in planner.calls[2][2]["content"]
         assert planner.calls[3][0] == planner.calls[1][0]
         assert planner.calls[3][1] == {
             "role": "assistant",
-            "content": "SELECT amount_2 FROM myschema.orders",
+            "content": _counting_plan(2),
         }
         assert failed_sql[1] in planner.calls[3][2]["content"]
 
@@ -742,7 +756,7 @@ class TestAgentPlannerConversation:
             search = await service.search(question)
             citation = search["citations"][0]  # type: ignore[index]
             plan = service.prepare(
-                sql=f"SELECT amount_{attempt} FROM myschema.orders",
+                sql=f"SELECT amount_{attempt + 1} FROM myschema.orders",
                 params=[],
                 evidence_ids=[citation["evidenceId"]],  # type: ignore[index]
                 bundle_id=str(search["bundleId"]),
@@ -782,10 +796,10 @@ class TestAgentPlannerConversation:
 
         assert len(planner.calls) == 3
         assert planner.calls[2] == [
-            {"role": "user", "content": f"Plan exactly: {question}"},
+            {"role": "user", "content": f"{PLANNING_SCOPE_RULES}\n\nPlan exactly: {question}"},
             {
                 "role": "assistant",
-                "content": "SELECT amount_2 FROM myschema.orders",
+                "content": _counting_plan(2),
             },
             {
                 "role": "user",
@@ -829,7 +843,9 @@ class TestAgentPlannerConversation:
         second = await service.search("second question")
 
         assert second["attempt"] == 1
-        assert planner.calls[1] == [{"role": "user", "content": "Plan exactly: second question"}]
+        assert planner.calls[1] == [
+            {"role": "user", "content": f"{PLANNING_SCOPE_RULES}\n\nPlan exactly: second question"}
+        ]
 
     async def test_configured_agent_can_cite_any_of_its_financial_sources(self) -> None:
         planner = _CountingPlanner(source_id="source-returned-by-sag")

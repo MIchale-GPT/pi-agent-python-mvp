@@ -14,7 +14,7 @@ Planning has three states:
   reports a named configuration diagnostic;
 - `legacy`: Tau searches one fixed SAG MCP source and preserves the original
   ranked-evidence result contract;
-- `agent`: Tau sends each requested result slice to a configured SAG Agent,
+- `agent`: Tau sends the complete requested scope to a configured SAG Agent,
   receives an answer plus citations in an independent evidence bundle, and
   keeps corrections in that slice's run-scoped planner conversation. Agent
   errors never fall back to MCP.
@@ -59,10 +59,10 @@ requires usable citations, but does not maintain a second per-source allowlist.
 
 ## Ask a data question
 
-For each requested result slice, the agent will:
+For a business query, the agent will:
 
-1. rewrite that slice into one SAG request containing its entity, normalized
-   report period, indicator and requested comparison/caliber, then ask SAG to
+1. rewrite the complete scope into one SAG request containing its entities, full
+   normalized period range, indicators and requested comparison/caliber, then ask SAG to
    use its SQL templates and resolve entity codes and reporting caliber itself;
 2. prepare a parameterized `SELECT` with schema-qualified tables and `%s`
    placeholders (values are never inlined into the displayed SQL);
@@ -77,10 +77,29 @@ is untrusted generated evidence—not executable authority. Tau's model still
 writes the final parameterized SQL, and prepare still validates its AST,
 allowlist, placeholders and current-run citation ids.
 
-When a request names multiple reporting calibers, periods, or entities, Tau may
-issue one planning search per requested value. Each returned bundle is prepared
-and executed independently; Tau does not mix evidence or SQL across bundles and
-aggregates all results into one final answer.
+A yearly monthly trend is one result set, not twelve separate planning requests.
+Prefer a set-based query covering all requested months; preserve monthly versus
+year-to-date semantics. Separate searches are reserved for genuinely independent
+queries that cannot share one evidenced plan. Tau does not mix evidence or SQL
+across bundles and aggregates independent results into one final answer.
+
+A chart-only planner reply is marked `planningStatus=incomplete`, with its original
+answer and citations preserved. The model can read relevant evidence or search again
+for the missing plan. This is not proof that the database lacks data or permissions,
+and must not be repaired by inventing tables or probing guessed schemas.
+
+### SAG 网页与 CLI
+
+SAG 网页与 CLI 共用 CodingSession、四个问数工具、业务提示词及 SQL 校验和修复逻辑。
+中文业务列名由共享规则要求；网页不再额外拒绝 CLI 可接受的英文列名或元数据查询。
+表格去重、图表与轨迹折叠由网页展示层处理，不向查询模型追加网页专用规划要求。
+
+网页仍使用独立的用户身份、会话映射、历史记录和执行确认，不共享个人 CLI 会话或
+凭据。SAG 管理的 Agent/提示词快照继续生效；比较结果时应保持模型、规划 Agent、
+知识源和业务配置一致，CLI 中临时切换的模型不自动改变已有网页会话。
+网页的并发保护、240 秒执行预算和 12 次工具预算仍保留，确认等待另计；本次修复
+不通过取消预算或放宽白名单获得成功。升级源码后重启 CLI，再恢复原会话，确保加载
+更新后的内置 Python 扩展；`/reload` 不能代替 Python 模块的进程重启。
 
 If DWS rejects the SQL statement, the tool error includes the frozen
 parameterized SQL and sanitized database error as a copyable `retryContext`.
@@ -156,3 +175,16 @@ uv run python ../SAG/scripts/export-query-sql-support.py --check
 ```
 
 生成页仅包含公开策略，不读取本地数据库地址、白名单内容或凭据。
+
+### 会话追问
+
+Agent 模式下，同一会话返回非空且未截断结果的成功查询，可在一小时内复用
+已执行 SQL 的表字段证据。空结果不能证明主体筛选条件正确，不新增复用记录。
+修改期间、排序或检查已知字段的 NULL 不必再次请求 SAG；新表字段、主体或口径
+仍需补充证据。即使重新打开会话，已有真实工具结果也能恢复复用记录；旧文本记录
+不会被自动转换为证据。会话压缩后证据不可用时重新检索。
+
+复用只省去知识规划，不缓存查询结果或执行许可。每次重新校验 SQL、重新确认执行；
+未知字段（包括过滤、关联和子查询内字段）被拒绝，不能用历史 SQL 绕过当前权限。
+新请求用 `reusePlanId` 指定来源并提交 SQL、参数；需要新知识时在检索工具中填写
+`newEvidenceReason`。复用指标图表必须保持已有指标表达式和单位。

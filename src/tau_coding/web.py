@@ -253,9 +253,18 @@ class WebSessionValidationError(ValueError):
 class TauWebRuntime:
     """Own CodingSession instances on one background asyncio event loop."""
 
-    def __init__(self, manager: SessionManager, session_loader: WebSessionLoader) -> None:
+    def __init__(
+        self,
+        manager: SessionManager,
+        session_loader: WebSessionLoader,
+        *,
+        literal_prompts: bool = False,
+        authorization_timeout_seconds: float = _TOOL_AUTHORIZATION_TIMEOUT_SECONDS,
+    ) -> None:
         self._manager = manager
         self._session_loader = session_loader
+        self._literal_prompts = literal_prompts
+        self._authorization_timeout_seconds = authorization_timeout_seconds
         self._slots: dict[str, _WebSessionSlot] = {}
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
@@ -272,9 +281,11 @@ class TauWebRuntime:
     def subscribe(
         self,
         session_id: str,
+        *,
+        reliable: bool = False,
     ) -> tuple[int, queue.Queue[_StreamItem | None]]:
         """Subscribe a request thread to one session's live event stream."""
-        return self._call(self._subscribe(session_id))
+        return self._call(self._subscribe(session_id, reliable=reliable))
 
     def unsubscribe(self, session_id: str, subscriber_id: int) -> None:
         """Remove a live event subscriber without blocking request cleanup."""
@@ -435,13 +446,17 @@ class TauWebRuntime:
     async def _subscribe(
         self,
         session_id: str,
+        *,
+        reliable: bool = False,
     ) -> tuple[int, queue.Queue[_StreamItem | None]]:
         record = self._require_session(session_id)
         slot = self._slots.setdefault(session_id, _WebSessionSlot())
         self._backfill_trace_from_disk(record, slot)
         subscriber_id = slot.next_subscriber_id
         slot.next_subscriber_id += 1
-        subscriber: queue.Queue[_StreamItem | None] = queue.Queue(maxsize=_SSE_QUEUE_ITEMS)
+        subscriber: queue.Queue[_StreamItem | None] = queue.Queue(
+            maxsize=0 if reliable else _SSE_QUEUE_ITEMS
+        )
         slot.subscribers[subscriber_id] = subscriber
         subscriber.put(
             self._stream_item(
@@ -503,7 +518,7 @@ class TauWebRuntime:
         record = self._require_session(session_id)
         slot = self._slots.setdefault(record.id, _WebSessionSlot())
         handle = await self._ensure_handle(record, slot)
-        command_name = _slash_command_name(message)
+        command_name = "" if self._literal_prompts else _slash_command_name(message)
         if command_name == "help":
             return {
                 "status": "command",
@@ -603,7 +618,9 @@ class TauWebRuntime:
         status: RunStatus = "completed"
         record = self._require_session(session_id)
         try:
-            async for event in slot.handle.session.prompt(message):
+            async for event in slot.handle.session.prompt(
+                message, expand_templates=not self._literal_prompts
+            ):
                 payload = _coding_event_payload(event)
                 payload["runId"] = run_id
                 payload["timestamp"] = current_timestamp_ms()
@@ -790,7 +807,7 @@ class TauWebRuntime:
         try:
             decision = await asyncio.wait_for(
                 pending.decision,
-                timeout=_TOOL_AUTHORIZATION_TIMEOUT_SECONDS,
+                timeout=self._authorization_timeout_seconds,
             )
         except TimeoutError:
             self._publish(

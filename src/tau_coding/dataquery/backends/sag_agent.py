@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import re
 from collections.abc import Awaitable, Mapping, Sequence
 from contextlib import suppress
+from time import monotonic
 from typing import Any, cast
 
 import httpx
@@ -21,9 +24,8 @@ from tau_coding.dataquery.service import KnowledgeError
 
 _CHAT_PATH = "/api/v1/openai/{agent_id}/chat/completions"
 _ERROR_CODE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
-_CONNECTION_PROBE = (
-    "请基于当前 Agent 已绑定的知识源返回一个简短、带引用的回答，用于连接测试。"
-)
+logger = logging.getLogger(__name__)
+_CONNECTION_PROBE = "请基于当前 Agent 已绑定的知识源返回一个简短、带引用的回答，用于连接测试。"
 
 
 class SagAgentSqlPlanner:
@@ -38,16 +40,21 @@ class SagAgentSqlPlanner:
         timeout_seconds: float = 60.0,
         max_response_bytes: int = 256 * 1024,
         transport: httpx.AsyncBaseTransport | None = None,
+        retry_count: int | None = None,
     ) -> None:
-        self._endpoint = (
-            f"{origin.rstrip('/')}"
-            f"{_CHAT_PATH.format(agent_id=agent_id)}"
-        )
+        self._endpoint = f"{origin.rstrip('/')}{_CHAT_PATH.format(agent_id=agent_id)}"
         self._token = token
         self._timeout_seconds = timeout_seconds
         self._max_response_bytes = max_response_bytes
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
+        self._retry_count = (
+            int(os.environ.get("TAU_SAG_PLANNER_RETRY", "1"))
+            if retry_count is None
+            else retry_count
+        )
+        if not 0 <= self._retry_count <= 2:
+            raise ValueError("TAU_SAG_PLANNER_RETRY must be between 0 and 2")
 
     async def plan(
         self,
@@ -58,28 +65,41 @@ class SagAgentSqlPlanner:
         body: dict[str, object] = {
             "messages": [dict(message) for message in messages],
             "stream": False,
+            "sag_sql_planning": True,
         }
         request_text = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
         client = self._client_or_create()
+        started = monotonic()
         try:
-            response = await _request_with_cancellation(
-                _post_bounded(
-                    client,
-                    self._endpoint,
-                    token=self._token,
-                    body=request_text.encode("utf-8"),
-                    max_response_bytes=self._max_response_bytes,
-                ),
-                signal,
-            )
+            for attempt in range(self._retry_count + 1):
+                try:
+                    response = await _request_with_cancellation(
+                        _post_bounded(
+                            client,
+                            self._endpoint,
+                            token=self._token,
+                            body=request_text.encode("utf-8"),
+                            max_response_bytes=self._max_response_bytes,
+                        ),
+                        signal,
+                    )
+                except httpx.ReadTimeout:
+                    if attempt == self._retry_count:
+                        raise
+                else:
+                    if (
+                        response.status_code < 500
+                        or attempt == self._retry_count
+                        or _permanent_failure(response)
+                    ):
+                        break
+                await asyncio.sleep(0.2 * 2**attempt)
         except httpx.HTTPError as exc:
             raise KnowledgeError(f"SAG Agent request failed: {type(exc).__name__}") from exc
         if response.status_code != 200:
             code = _response_error_code(response)
             suffix = f" ({code})" if code else ""
-            raise KnowledgeError(
-                f"SAG Agent request failed: HTTP {response.status_code}{suffix}"
-            )
+            raise KnowledgeError(f"SAG Agent request failed: HTTP {response.status_code}{suffix}")
         try:
             raw = response.json()
         except ValueError as exc:
@@ -88,6 +108,17 @@ class SagAgentSqlPlanner:
             raise KnowledgeError("SAG Agent returned an invalid response object")
         answer = _answer(raw)
         citations = _citations(raw)
+        logger.info(
+            "planner_completed elapsed_ms=%d attempts=%d usage=%s",
+            round((monotonic() - started) * 1000),
+            attempt + 1,
+            {
+                k: v
+                for k, v in (raw.get("usage") or {}).items()
+                if k in {"prompt_tokens", "completion_tokens", "total_tokens"}
+                and isinstance(v, int)
+            },
+        )
         if not answer.strip():
             raise KnowledgeError("SAG Agent response is missing an answer")
         if not any(citation.snippet.strip() for citation in citations):
@@ -179,6 +210,17 @@ def _response_error_code(response: httpx.Response) -> str | None:
     return code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else None
 
 
+def _permanent_failure(response: httpx.Response) -> bool:
+    try:
+        error = response.json().get("error", {})
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(error, dict) and (
+        error.get("retryable") is False
+        or error.get("code") in {"llm_bad_request", "llm_context_budget_exceeded", "llm_auth_error"}
+    )
+
+
 async def _request_with_cancellation(
     request: Awaitable[httpx.Response],
     signal: ToolCancellationToken | None,
@@ -242,9 +284,7 @@ async def _post_bounded(
         async for chunk in response.aiter_bytes():
             content.extend(chunk)
             if len(content) > max_response_bytes:
-                raise KnowledgeError(
-                    f"SAG Agent response exceeds {max_response_bytes} UTF-8 bytes"
-                )
+                raise KnowledgeError(f"SAG Agent response exceeds {max_response_bytes} UTF-8 bytes")
         return httpx.Response(
             response.status_code,
             headers=response.headers,

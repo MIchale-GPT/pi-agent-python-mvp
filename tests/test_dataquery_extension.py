@@ -28,6 +28,7 @@ from tau_coding.dataquery.config import (
     ENV_DWS_USER,
     bundled_extension_dir,
 )
+from tau_coding.dataquery.planner import PLANNING_SCOPE_RULES
 from tau_coding.dataquery.service import KnowledgeError, QuerySqlError
 from tau_coding.extensions.runtime import ExtensionRuntime
 from tau_coding.resources import TauResourcePaths
@@ -77,9 +78,7 @@ class _FakeSagAgentServer:
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 server.requests.append(payload)
                 server.paths.append(self.path)
-                server.authorization_headers.append(
-                    self.headers.get("Authorization", "")
-                )
+                server.authorization_headers.append(self.headers.get("Authorization", ""))
                 if server.response_mode == "auth_error":
                     self._write_response(
                         401,
@@ -101,6 +100,9 @@ class _FakeSagAgentServer:
                     "SELECT bad_column FROM myschema.orders WHERE period = %s"
                     if attempt == 1
                     else "SELECT amount FROM myschema.orders WHERE period = %s"
+                )
+                answer = (
+                    "```sql_plan\n" + json.dumps({"sql": answer, "params": ["202504"]}) + "\n```"
                 )
                 response = {
                     "id": f"chat-{attempt}",
@@ -247,6 +249,7 @@ class _RepairingFakeSqlPlanner(_FakeSqlPlanner):
             if attempt == 1
             else "SELECT amount FROM myschema.orders WHERE period = '202504'"
         )
+        answer = "```sql_plan\n" + json.dumps({"sql": answer, "params": []}) + "\n```"
         return SimpleNamespace(
             answer=answer,
             citations=(
@@ -376,7 +379,7 @@ def test_search_guideline_avoids_fragmented_sag_round_trips(tmp_path: Path, monk
     assert "stop" in guideline.lower()
 
 
-def test_agent_search_guideline_splits_multiple_dimensions_and_aggregates_results(
+def test_agent_search_guideline_preserves_complete_period_range(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
@@ -401,10 +404,13 @@ def test_agent_search_guideline_splits_multiple_dimensions_and_aggregates_result
     )
     guideline = "\n".join(search.prompt_guidelines)
 
-    assert "multiple calibers, periods, or entities" in guideline
-    assert "one data_knowledge_search call for each requested value" in guideline
+    assert "one set-based SQL query for all requested months" in guideline
+    assert "one search per value" in guideline
+    assert "one data_knowledge_search call for each requested value" not in guideline
     assert "Do not mix evidence or SQL across bundles" in guideline
     assert "aggregate the results" in guideline
+    assert "planningStatus of incomplete" in guideline
+    assert "Never invent" in guideline
 
 
 def test_unconfigured_extension_registers_no_tools(tmp_path: Path, monkeypatch) -> None:
@@ -547,13 +553,20 @@ async def test_agent_mode_search_returns_answer_oriented_payload(
     ]
     assert payload["citations"][0]["evidenceId"].startswith("evidence_")
     assert planner.calls == [
-        [{"role": "user", "content": "参考知识库模板：京能技术 2025年4月短期借款是多少"}]
+        [
+            {
+                "role": "user",
+                "content": (
+                    f"{PLANNING_SCOPE_RULES}\n\n参考知识库模板：京能技术 2025年4月短期借款是多少"
+                ),
+            }
+        ]
     ]
     assert result.details == {
         "sagExchange": {
             "mode": "agent",
             "attempt": 1,
-            "request": "参考知识库模板：京能技术 2025年4月短期借款是多少",
+            "request": planner.calls[0][0]["content"],
             "response": "SAG raw response",
             "citations": [
                 {
@@ -700,9 +713,7 @@ async def test_agent_mode_repairs_failed_sql_in_the_same_planner_conversation(
     assert repaired["mode"] == "agent"
     assert repaired["attempt"] == 2
     assert "SAG Agent 修正完成 · 第 2 轮" in str(
-        runtime.render_tool_result(
-            "data_knowledge_search", repaired_result, expanded=False
-        )
+        runtime.render_tool_result("data_knowledge_search", repaired_result, expanded=False)
     )
     assert "amount" in repaired["answer"]
     assert len(planner.calls) == 2
@@ -710,9 +721,9 @@ async def test_agent_mode_repairs_failed_sql_in_the_same_planner_conversation(
     assert planner.calls[1][1]["role"] == "assistant"
     assert "bad_column" in planner.calls[1][1]["content"]
     assert planner.calls[1][2]["role"] == "user"
-    assert "SELECT bad_column FROM myschema.orders WHERE period = %s" in planner.calls[1][2][
-        "content"
-    ]
+    assert (
+        "SELECT bad_column FROM myschema.orders WHERE period = %s" in planner.calls[1][2]["content"]
+    )
     assert 'column "bad_column" does not exist' in planner.calls[1][2]["content"]
     assert "202504" not in planner.calls[1][2]["content"]
 
@@ -852,11 +863,11 @@ async def test_registered_tools_complete_http_agent_failure_repair_workflow(
     assert second_messages[1]["role"] == "assistant"
     assert "bad_column" in second_messages[1]["content"]
     assert second_messages[2]["role"] == "user"
-    assert "SELECT bad_column FROM myschema.orders WHERE period = %s" in second_messages[2][
-        "content"
-    ]
-    assert "202504" not in json.dumps(server.requests, ensure_ascii=False)
-    assert "202504" not in json.dumps(repaired_result.details, ensure_ascii=False)
+    assert (
+        "SELECT bad_column FROM myschema.orders WHERE period = %s" in second_messages[2]["content"]
+    )
+    assert "202504" not in server.requests[-1]["messages"][-1]["content"]
+    # Planner-authored parameters are already part of its own prior answer.
     assert "secret-token" not in json.dumps(repaired_result.details, ensure_ascii=False)
 
 
@@ -912,9 +923,7 @@ async def test_registered_search_sanitizes_agent_protocol_failures(
 
     assert "provider secret" not in str(exc_info.value)
     assert "secret-token" not in str(exc_info.value)
-    assert server.paths == [
-        "/api/v1/openai/trusted-agent/chat/completions"
-    ]
+    assert server.paths == ["/api/v1/openai/trusted-agent/chat/completions"]
 
 
 async def test_cancelled_query_does_not_open_an_agent_correction_turn(
@@ -926,7 +935,22 @@ async def test_cancelled_query_does_not_open_an_agent_correction_turn(
         def is_cancelled(self) -> bool:
             return True
 
-    planner = _FakeSqlPlanner()
+    class Planner(_FakeSqlPlanner):
+        async def plan(self, messages, *, signal=None):
+            answer = await super().plan(messages, signal=signal)
+            answer.answer = (
+                "```sql_plan\n"
+                + json.dumps(
+                    {
+                        "sql": "SELECT amount FROM myschema.orders WHERE period = %s",
+                        "params": ["202504"],
+                    }
+                )
+                + "\n```"
+            )
+            return answer
+
+    planner = Planner()
     query = FakeQueryBackend(table_rows=ROWS, columns=COLUMNS)
     monkeypatch.setattr(
         "tau_coding.dataquery.extension._resolve_extension_config",
@@ -1077,8 +1101,8 @@ async def test_concurrent_agent_planner_turns_are_serialized(
     assert (await second).text
     assert planner.max_active_calls == 1
     assert planner.calls == [
-        [{"role": "user", "content": "参考知识库模板：first question"}],
-        [{"role": "user", "content": "参考知识库模板：second question"}],
+        [{"role": "user", "content": f"{PLANNING_SCOPE_RULES}\n\n参考知识库模板：first question"}],
+        [{"role": "user", "content": f"{PLANNING_SCOPE_RULES}\n\n参考知识库模板：second question"}],
     ]
 
 

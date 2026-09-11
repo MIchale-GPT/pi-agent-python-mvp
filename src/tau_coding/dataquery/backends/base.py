@@ -104,7 +104,7 @@ class QueryResult:
     """A completed read-only query result (bounded, decision 10)."""
 
     columns: list[QueryColumn]
-    rows: list[list[str]]
+    rows: list[list[str | None]]
     truncated: bool
     truncation_reasons: list[str]
     previewed_cells: int = 0
@@ -155,7 +155,7 @@ class QueryBackend(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class TruncationOutcome:
-    rows: list[list[str]]
+    rows: list[list[str | None]]
     truncated: bool
     reasons: tuple[str, ...]
     previewed_cells: int
@@ -190,7 +190,7 @@ def truncate_result_rows(
     (``byte_limit``, never half rows), and finally stop at ``max_rows``
     (``row_limit``). Any applied limit sets ``truncated``.
     """
-    kept: list[list[str]] = []
+    kept: list[list[str | None]] = []
     reasons: list[str] = []
     previewed_cells = 0
     total_bytes = 0
@@ -201,8 +201,11 @@ def truncate_result_rows(
                 reasons.append("row_limit")
             break
 
-        previewed: list[str] = []
+        previewed: list[str | None] = []
         for cell in row:
+            if cell is None:
+                previewed.append(None)
+                continue
             text = serialize_cell(cell)
             size = len(text.encode("utf-8"))
             if size > max_cell_bytes:
@@ -214,7 +217,11 @@ def truncate_result_rows(
             else:
                 previewed.append(text)
 
-        row_bytes = sum(len(cell.encode("utf-8")) for cell in previewed) + len(previewed) - 1
+        row_bytes = (
+            sum(4 if cell is None else len(cell.encode("utf-8")) for cell in previewed)
+            + len(previewed)
+            - 1
+        )
         if total_bytes + row_bytes > max_result_bytes:
             if "byte_limit" not in reasons:
                 reasons.append("byte_limit")
